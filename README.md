@@ -6,10 +6,12 @@ Tools for extracting, translating, and repacking visual novels that use the Syst
 
 - **DDP2/DDP3 Archives** - Resource archives used by SystemNNN games
 - **HXB Scripts** (DDSxHXB) - Script files containing game text (UTF-16LE encoded)
+- **SPT Scripts** (SPTHEADER) - Script files used by newer BlackCyc games (Shift-JIS encoded)
 
 ## Tested Games
 
-- 神学校 -Noli me tangere- (Shingakkou)
+- 神学校 -Noli me tangere- (Shingakkou) - DDP3/HXB format
+- 夢幻廻廊2～螺旋～ (Mugen Kairou 2) - SPT format
 - Other PIL/SLASH/BlackCyc titles using SystemNNN
 
 ## Features
@@ -48,11 +50,14 @@ python3 systemnnn_tools.py extract sin_text.dat -o extracted/ --no-decrypt
 ### 2. Extract Text for Translation
 
 ```bash
-# Extract text from all HXB scripts in a directory
+# Extract text from all scripts in a directory (auto-detects HXB/SPT)
 python3 systemnnn_tools.py extract-text extracted/ -o translations/
 
-# Extract text from a single script
+# Extract text from a single HXB script
 python3 systemnnn_tools.py extract-text extracted/main05.hxb -o main05.json
+
+# Extract text from SPT scripts (Mugen Kairou 2, etc.)
+python3 systemnnn_tools.py extract-text spt/ -o translations/
 ```
 
 This creates JSON files with all translatable strings:
@@ -136,6 +141,13 @@ Offset  Size  Description
 - Signature: `DDSxHXB` (stored as `DDWuHXB` in archives)
 - Text encoding: UTF-16LE
 - Encryption: XOR with key derived from file length
+
+### SPT Script Format
+
+- Signature: `SPTHEADER0` at offset 0x30 (after XOR decryption)
+- Text encoding: Shift-JIS
+- Encryption: XOR 0xFF (simple byte-wise XOR)
+- Used by: Mugen Kairou 2 and similar BlackCyc games
 
 ### Compression
 
