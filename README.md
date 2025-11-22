@@ -10,8 +10,8 @@ Personal collection of reverse engineering tools for Japanese visual novel trans
 
 ## Tested Games
 
-- 神学校 -Noli me tangere- (Shingakkou)
-- 夢幻廻廊2～螺旋～ (Mugen Kairou 2)
+- 神学校 -Noli me tangere- (Shingakkou) - DDSystem
+- 夢幻廻廊2～螺旋～ (Mugen Kairou 2) - System-NNN
 - Other PIL/SLASH/BlackCyc/CYCLET titles
 
 ## Features
