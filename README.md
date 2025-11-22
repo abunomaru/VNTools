@@ -2,11 +2,56 @@
 
 Personal collection of reverse engineering tools for Japanese visual novel translation patching.
 
+## Supported Engines
+
+This toolkit supports games built on the **System-NNN** family of visual novel engines, developed by PIL/SLASH and related brands.
+
+### Engine Variants
+
+| Engine | Developer | Example Games |
+|--------|-----------|---------------|
+| **System-NNN** | PIL/SLASH | Mugen Kairou series |
+| **DDSystem** | CYCLET | Shingakkou -Noli me tangere- |
+| **BlackCyc** | BLACK CYC | Various darker-themed titles |
+
 ## Supported Formats
 
-- **DDP2/DDP3 Archives** - Resource archives used by SystemNNN games
-- **HXB Scripts** (DDSxHXB) - Script files containing game text (UTF-16LE encoded)
-- **SPT Scripts** (SPTHEADER) - Script files used by newer BlackCyc games (Shift-JIS encoded)
+### Script Formats (Currently Implemented)
+
+| Format | Signature | Encoding | Encryption | Description |
+|--------|-----------|----------|------------|-------------|
+| **HXB** | `DDSxHXB` | UTF-16LE | XOR (length-based key) | Main script format for DDSystem/System-NNN |
+| **SPT** | `SPTHEADER0` | Shift-JIS | XOR 0xFF | Script format for newer BlackCyc games |
+
+### Archive Formats (Currently Implemented)
+
+| Format | Signature | Description |
+|--------|-----------|-------------|
+| **DDP2** | `DDP2` | Older resource archive format |
+| **DDP3** | `DDP3` | Main resource archive format with UTF-16LE filenames |
+
+### Additional System-NNN Formats (Reference)
+
+These formats are used by System-NNN games but not yet implemented in this toolkit:
+
+| Format | Extension | Description |
+|--------|-----------|-------------|
+| **DWQ** | `.gtb` + `.gpk` | Image archives (BMP/JPEG with optional masks) |
+| **VAW** | `.vtb` + `.vpk` | Voice/sound effect archives |
+| **WGQ** | `.wgq` | BGM files (64-byte header + OGG data) |
+| **MFT** | `.mft` | Bitmap font files (2/4/8-bit grayscale, Shift-JIS) |
+| **XTX/FXF** | `.xtx`/`.fxf` | Encrypted script variants (XOR 0xFF) |
+
+#### DWQ Image Pack Types
+
+| Type | Description |
+|------|-------------|
+| 1 | Compressed BMP |
+| 2 | Standard BMP with alpha mask |
+| 3 | Compressed BMP with alpha mask |
+| 5 | JPEG |
+| 7 | JPEG with alpha mask |
+| 8 | PNG (some versions) |
 
 ## Tested Games
 
@@ -123,6 +168,25 @@ python3 systemnnn_tools.py analyze sin_text.dat
 
 ## Technical Details
 
+### Game Directory Structure
+
+System-NNN games typically organize assets in these directories:
+
+```
+game/
+├── ev/          # Event CGs (DWQ format)
+├── bg/          # Background images (DWQ format)
+├── ta/          # Character sprites/textures (DWQ format)
+├── sys/         # System graphics (DWQ format)
+│   ├── sm/      # Small system images
+│   └── sc/      # Screen images
+├── se/          # Sound effects (VAW format)
+├── bgm/         # Background music (WGQ/OGG format)
+├── cdwave/      # Voice files (VAW format)
+├── *.dat        # DDP archives containing scripts and resources
+└── *.mft        # Font files
+```
+
 ### DDP3 Archive Format
 
 ```
@@ -136,27 +200,60 @@ Offset  Size  Description
         var   File data (compressed)
 ```
 
+File entries contain UTF-16LE encoded filenames with variable-length headers.
+
 ### HXB Script Format
 
-- Signature: `DDSxHXB` (stored as `DDWuHXB` in archives)
+- Signature: `DDSxHXB` (stored as `DDWuHXB` in archives, encrypted)
 - Text encoding: UTF-16LE
 - Encryption: XOR with key derived from file length
+- Contains dialogue, choices, and game logic
 
 ### SPT Script Format
 
 - Signature: `SPTHEADER0` at offset 0x30 (after XOR decryption)
 - Text encoding: Shift-JIS
 - Encryption: XOR 0xFF (simple byte-wise XOR)
+- Same encryption as XTX/FXF format
 - Used by: Mugen Kairou 2 and similar BlackCyc games
+
+### DWQ Image Format
+
+Image archives consist of paired files:
+- `.gtb` - Table file containing file index and metadata
+- `.gpk` - Pack file containing compressed image data
+
+Each image entry has a 64-byte ASCII header specifying the pack type (compression method).
+
+### VAW Audio Format
+
+Voice/sound archives consist of paired files:
+- `.vtb` - Table file with 12-byte entries (8-byte filename + 4-byte offset)
+- `.vpk` - Pack file containing audio data (WAV or OGG)
+
+### MFT Font Format
+
+```
+Offset  Size  Description
+0x00    3     Signature "MFT"
+0x20    3     Font size (ASCII digits)
+0x30    1     Bit depth (2, 4, or 8-bit per pixel)
+0x40+   var   Character bitmap data (Shift-JIS order)
+```
+
+Characters are rendered as anti-aliased grayscale bitmaps covering the Shift-JIS character set (approximately 9,024 characters).
 
 ### Compression
 
-Uses ShsCompression (LZSS variant) - same as GARbro implementation.
+Uses SHS Compression (LZSS variant) - same as GARbro implementation. Features:
+- Sliding window up to 8191 bytes
+- Extended literal count encodings
+- Back-reference with overlap support
 
 ## Thanks
 
 - [GARbro](https://github.com/morkt/GARbro) by morkt - Format specifications and compression algorithms
-- [SystemNNN](https://github.com/tinyan/SystemNNN) by tinyan - Engine source code reference
+- [systemNNN_support](https://github.com/tinyan/systemNNN_support) by tinyan - Engine tools and format documentation (DWQ, VAW, MFT formats)
 - PIL/SLASH/BlackCyc/CYCLET - For creating amazing visual novels
 
 ## License
