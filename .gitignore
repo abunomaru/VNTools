@@ -4,9 +4,19 @@ extracted_test/
 text_output/
 patched/
 translations/
+spt/
+dwq/
 
-# Data files (too large for git)
+# Game files (do not commit copyrighted content)
 *.dat
+*.spt
+*.hxb
+*.vpk
+*.vtb
+*.gpk
+*.gtb
+*.xtx
+*.fxf
 
 # Python
 __pycache__/

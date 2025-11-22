@@ -153,10 +153,11 @@ Offset  Size  Description
 
 Uses ShsCompression (LZSS variant) - same as GARbro implementation.
 
-## Credits
+## Thanks
 
-- Based on format specifications from [GARbro](https://github.com/morkt/GARbro)
-- [SystemNNN source code](https://github.com/tinyan/SystemNNN)
+- [GARbro](https://github.com/morkt/GARbro) by morkt - Format specifications and compression algorithms
+- [SystemNNN](https://github.com/tinyan/SystemNNN) by tinyan - Engine source code reference
+- PIL/SLASH/BlackCyc/CYCLET - For creating amazing visual novels
 
 ## License
 
