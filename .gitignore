@@ -1,0 +1,21 @@
+# Test/output directories
+extracted/
+extracted_test/
+text_output/
+patched/
+translations/
+
+# Data files (too large for git)
+*.dat
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
