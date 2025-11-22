@@ -1,6 +1,6 @@
-# VNTools - SystemNNN Visual Novel Tools
+# VNTools
 
-Tools for extracting, translating, and repacking visual novels that use the SystemNNN/PIL/SLASH/CYCLET/BlackCyc engine.
+Personal collection of reverse engineering tools for Japanese visual novel translation patching.
 
 ## Supported Formats
 
@@ -10,9 +10,9 @@ Tools for extracting, translating, and repacking visual novels that use the Syst
 
 ## Tested Games
 
-- 神学校 -Noli me tangere- (Shingakkou) - DDP3/HXB format
-- 夢幻廻廊2～螺旋～ (Mugen Kairou 2) - SPT format
-- Other PIL/SLASH/BlackCyc titles using SystemNNN
+- 神学校 -Noli me tangere- (Shingakkou)
+- 夢幻廻廊2～螺旋～ (Mugen Kairou 2)
+- Other PIL/SLASH/BlackCyc/CYCLET titles
 
 ## Features
 
