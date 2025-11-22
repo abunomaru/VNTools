@@ -507,6 +507,405 @@ class DDPArchive:
 
 
 # =============================================================================
+# SPT Script Encryption/Decryption (Mugen Kairou 2, etc.)
+# =============================================================================
+
+def spt_decrypt(data: bytes) -> bytes:
+    """Decrypt SPT script files (XOR 0xFF)."""
+    return bytes(b ^ 0xFF for b in data)
+
+
+def spt_encrypt(data: bytes) -> bytes:
+    """Encrypt SPT script files (XOR 0xFF - same as decrypt)."""
+    return spt_decrypt(data)
+
+
+def is_spt_file(data: bytes) -> bool:
+    """Check if data is an SPT script file."""
+    if len(data) < 0x40:
+        return False
+    decrypted = spt_decrypt(data[0x30:0x40])
+    return decrypted.startswith(b'SPTHEADER')
+
+
+# =============================================================================
+# SPT Script Parser
+# =============================================================================
+
+@dataclass
+class SPTString:
+    """Represents an extractable text string from SPT script."""
+    index: int
+    offset: int
+    original: str
+    translated: str = ""
+    context: str = ""
+
+
+class SPTScript:
+    """
+    Parser for SPT script files (Mugen Kairou 2, etc.).
+    XOR 0xFF encrypted, Shift-JIS text encoding.
+    """
+
+    def __init__(self):
+        self.strings: List[SPTString] = []
+        self.raw_data: bytes = b''
+        self.decrypted_data: bytes = b''
+
+    def parse(self, data: bytes) -> bool:
+        """Parse SPT script and extract text strings."""
+        self.raw_data = data
+        self.decrypted_data = spt_decrypt(data)
+
+        # Check signature
+        if len(self.decrypted_data) < 0x40:
+            return False
+
+        signature = self.decrypted_data[0x30:0x3A]
+        if not signature.startswith(b'SPTHEADER'):
+            print(f"Not a valid SPT file (got: {signature})")
+            return False
+
+        # Extract Shift-JIS strings
+        self._extract_shiftjis_strings()
+        return True
+
+    def _extract_shiftjis_strings(self):
+        """Extract Shift-JIS encoded text strings.
+
+        SPT format has text strings that are null-terminated.
+        After null byte, there's typically a 1-byte control/command code before the text.
+        Pattern: 00 <control_byte> <actual_text> 00
+
+        Control bytes can be in ranges 0x40-0x7F (ASCII) or 0xA0-0xFF (half-width katakana range).
+        Real text starts with 0x81-0x9F (Shift-JIS symbols/hiragana/katakana/kanji).
+        """
+        data = self.decrypted_data
+        i = 0x1000  # Skip header/code area
+        idx = 0
+
+        while i < len(data) - 2:
+            # Look for null byte followed by text
+            if data[i] == 0:
+                j = i + 1
+
+                # Skip consecutive nulls
+                while j < len(data) and data[j] == 0:
+                    j += 1
+
+                if j >= len(data):
+                    break
+
+                # Skip control byte(s) until we find a valid text start
+                # Valid text usually starts with:
+                # - 0x8140 (full-width space)
+                # - 0x8167 (")  0x8175 (「) - quotes
+                # - 0x834X (katakana ク, ケ, etc. for names)
+                # - 0x89XX-0x9FXX (kanji)
+                # Control bytes can be ANY byte including valid Shift-JIS first bytes
+                max_skip = 6
+                while j < len(data) - 1 and data[j] != 0 and j - i <= max_skip:
+                    b = data[j]
+                    b2 = data[j + 1] if j + 1 < len(data) else 0
+
+                    # Definitely valid text starts:
+                    # Full-width space (81 40)
+                    if b == 0x81 and b2 == 0x40:
+                        break
+                    # Opening quotes/brackets (81 67=", 81 75=「, 81 77=『)
+                    if b == 0x81 and b2 in [0x67, 0x68, 0x75, 0x77]:
+                        break
+                    # Kanji (88-9F as first byte, almost always real text)
+                    if 0x88 <= b <= 0x9F:
+                        break
+                    # Common katakana names (83 4X-5X range: ク, ケ, コ, etc.)
+                    if b == 0x83 and 0x4E <= b2 <= 0x96:  # Common katakana
+                        break
+                    # Hiragana (82 9F-F1: あ-ん)
+                    if b == 0x82 and 0x9F <= b2 <= 0xF1:
+                        break
+
+                    # Skip this byte pair if it's Shift-JIS (likely control)
+                    if 0x81 <= b <= 0x9F or 0xE0 <= b <= 0xEF:
+                        j += 2
+                    else:
+                        j += 1
+
+                if j < len(data) - 1 and (0x81 <= data[j] <= 0x9F or 0xE0 <= data[j] <= 0xEF):
+                    start = j
+                    end = j
+
+                    # Read continuous text
+                    while end < len(data):
+                        b = data[end]
+                        if b == 0:
+                            break
+                        # Shift-JIS multi-byte (0x81-0x9F, 0xE0-0xEF are first bytes)
+                        if 0x81 <= b <= 0x9F or 0xE0 <= b <= 0xEF:
+                            if end + 1 < len(data):
+                                end += 2
+                            else:
+                                break
+                        # ASCII printable + newlines
+                        elif 0x20 <= b <= 0x7E or b in [0x0A, 0x0D]:
+                            end += 1
+                        # Half-width katakana (only within text, not as control)
+                        elif 0xA1 <= b <= 0xDF:
+                            end += 1
+                        else:
+                            break
+
+                    if end > start + 4:
+                        try:
+                            text = data[start:end].decode('shift-jis', errors='strict')
+                            # Must contain actual Japanese text (hiragana/katakana/kanji)
+                            has_japanese = any(
+                                0x3040 <= ord(c) <= 0x30FF or  # Hiragana/Katakana
+                                0x4E00 <= ord(c) <= 0x9FFF     # Kanji
+                                for c in text
+                            )
+                            if len(text) >= 2 and has_japanese:
+                                # Clean up: remove garbage prefix characters
+                                # These are control codes that got decoded as text
+                                text = self._clean_text_prefix(text)
+                                if text and len(text) >= 2:
+                                    self.strings.append(SPTString(
+                                        index=idx,
+                                        offset=start,
+                                        original=text
+                                    ))
+                                    idx += 1
+                                i = end
+                                continue
+                        except:
+                            pass
+            i += 1
+
+    def _clean_text_prefix(self, text: str) -> str:
+        """Remove garbage control code prefixes from text.
+
+        SPT files have control bytes before text that can decode as valid
+        but meaningless Shift-JIS characters. We need to find the actual
+        text start.
+        """
+        import re
+
+        # For dialogue lines (name + newline + bracket), find the actual name
+        # Pattern: <garbage><name>\n「<dialogue>
+        # Common names: 奥様, クラスメイト, "たろ", "しろ", ハナ, etc.
+
+        # Check for dialogue pattern
+        if '\n「' in text or '\n『' in text:
+            # Find the bracket position
+            bracket_match = re.search(r'\n[「『]', text)
+            if bracket_match:
+                before_bracket = text[:bracket_match.start()]
+                after_bracket = text[bracket_match.start():]
+
+                # Clean up the name part (before bracket)
+                # Look for known character name patterns
+                name_patterns = [
+                    r'(奥様)',
+                    r'(クラスメイト[ＡＢＣ]?)',
+                    r'("たろ")',
+                    r'("しろ")',
+                    r'(奈菜香)',
+                    r'(百合絵)',
+                    r'(祐美子)',
+                    r'(薫子)',
+                    r'(ハナ)',
+                    r'(グモルク)',
+                    r'(女の子[ＡＢ]?)',
+                    r'(通行人[ＡＢＣＤＥＦＧ]?)',
+                    r'(アナウンス)',
+                ]
+
+                for pattern in name_patterns:
+                    match = re.search(pattern, before_bracket)
+                    if match:
+                        # Return name + bracket + dialogue
+                        return match.group(1) + after_bracket
+
+                # If no known name, try to find katakana word at the end
+                kata_match = re.search(r'([ァ-ヶー]+[ＡＢＣ]?)$', before_bracket)
+                if kata_match:
+                    name = kata_match.group(1)
+                    # Fix common truncations
+                    if name == 'ラスメイトＡ' or name == 'ラスメイト':
+                        name = 'クラスメイトＡ'
+                    return name + after_bracket
+
+                # Try to find quoted name pattern at the end
+                quote_match = re.search(r'("[\w]+")$', before_bracket)
+                if quote_match:
+                    return quote_match.group(1) + after_bracket
+
+                # Try partial quote at end
+                partial_quote = re.search(r'([\w]+")\s*$', before_bracket)
+                if partial_quote:
+                    name = '"' + partial_quote.group(1)
+                    return name + after_bracket
+
+                # If no match, try to clean leading garbage
+                cleaned = self._clean_leading_garbage(before_bracket)
+                return cleaned + after_bracket
+
+        # For non-dialogue lines, just clean leading garbage
+        return self._clean_leading_garbage(text)
+
+    def _clean_leading_garbage(self, text: str) -> str:
+        """Remove garbage characters from the start of text."""
+        # Known garbage patterns (control codes that decode as text)
+        garbage_patterns = [
+            'ブャN', 'ｃN', '泣N', '轤ﾈ', '焉@', 'ﾈた', 'ｳ゛', '黶@',
+            '諱', '轣', '驍', '齦', '齬', '謔', '閧', '黷',  # Common garbage kanji
+            '＝@', 'た　', 'し　', 'ぁ　', 'い　', 'に　', 'か　', 'は　',  # Single kana + space
+        ]
+        for pattern in garbage_patterns:
+            if text.startswith(pattern):
+                text = text[len(pattern):]
+
+        # Fix known truncated patterns
+        if text.startswith('ラスメイトＡ'):
+            text = 'ク' + text
+        if text.startswith('ラスメイト\n'):
+            text = 'ク' + text
+        if text.startswith('たろ"'):
+            text = '"' + text
+
+        while text:
+            c = text[0]
+            code = ord(c)
+
+            # Keep: full-width space, quotes, brackets, normal punctuation after text
+            if c in '　 "「『（【':
+                break
+
+            # Keep: kanji
+            if 0x4E00 <= code <= 0x9FFF:
+                break
+
+            # Keep: hiragana if followed by more text (part of a word)
+            if 0x3041 <= code <= 0x3096:  # Hiragana
+                if len(text) > 1:
+                    next_c = ord(text[1])
+                    # If followed by more Japanese text, keep it
+                    if (0x3040 <= next_c <= 0x30FF or
+                        0x4E00 <= next_c <= 0x9FFF or
+                        next_c == 0x3000):  # Full-width space
+                        break
+                    # Single hiragana followed by space might be valid
+                    if text[1] in '　 ':
+                        # Check if it's common patterns like "が　" "は　" etc.
+                        if c in 'がはもをにでとへや':
+                            break
+                # Remove isolated hiragana
+                text = text[1:]
+                continue
+
+            # Keep: katakana word (2+ consecutive katakana)
+            if 0x30A0 <= code <= 0x30FF:  # Katakana
+                if len(text) > 1 and 0x30A0 <= ord(text[1]) <= 0x30FF:
+                    break
+                # Single katakana is garbage
+                text = text[1:]
+                continue
+
+            # Skip: punctuation at start
+            if c in '、。？！…―゛゜':
+                text = text[1:]
+                continue
+
+            # Skip: small kana (usually garbage when alone)
+            if c in 'ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ':
+                text = text[1:]
+                continue
+
+            # Skip: half-width katakana
+            if 0xFF61 <= code <= 0xFF9F:
+                text = text[1:]
+                continue
+
+            # Skip: ASCII letters alone (control codes)
+            if 0x41 <= code <= 0x5A or 0x61 <= code <= 0x7A:
+                if len(text) > 1 and ord(text[1]) >= 0x80:
+                    # ASCII followed by Japanese = control byte
+                    text = text[1:]
+                    continue
+                break
+
+            # Default: keep
+            break
+
+        return text
+
+    def export_strings(self, filepath: str):
+        """Export strings to JSON for translation."""
+        export_data = {
+            'source_file': '',
+            'format': 'spt-shiftjis',
+            'string_count': len(self.strings),
+            'strings': [
+                {
+                    'index': s.index,
+                    'offset': s.offset,
+                    'original': s.original,
+                    'translated': s.translated,
+                    'context': s.context
+                }
+                for s in self.strings
+            ]
+        }
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+    def import_strings(self, filepath: str):
+        """Import translated strings from JSON."""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            import_data = json.load(f)
+
+        translation_map = {
+            s['index']: s.get('translated', '')
+            for s in import_data.get('strings', [])
+        }
+
+        for string in self.strings:
+            if string.index in translation_map:
+                string.translated = translation_map[string.index]
+
+    def rebuild(self) -> bytes:
+        """Rebuild SPT file with translated strings."""
+        result = bytearray(self.decrypted_data)
+
+        # Sort strings by offset in reverse to avoid shifting issues
+        sorted_strings = sorted(self.strings, key=lambda s: s.offset, reverse=True)
+
+        for string in sorted_strings:
+            if not string.translated:
+                continue
+
+            # Find original string end (null terminator)
+            orig_end = string.offset
+            while orig_end < len(result) and result[orig_end] != 0:
+                orig_end += 1
+
+            # Encode new string
+            try:
+                new_bytes = string.translated.encode('shift-jis')
+            except UnicodeEncodeError:
+                print(f"Warning: Could not encode string at index {string.index}")
+                continue
+
+            # Replace
+            result[string.offset:orig_end] = new_bytes
+
+        # Re-encrypt
+        return spt_encrypt(bytes(result))
+
+
+# =============================================================================
 # HXB Text String
 # =============================================================================
 
@@ -857,13 +1256,26 @@ def extract_archive(archive_path: str, output_dir: str, decrypt: bool = True) ->
 
 
 def extract_text(script_path: str, output_path: str) -> bool:
-    """Extract translatable text from an HXB script."""
+    """Extract translatable text from an HXB or SPT script (auto-detect)."""
     print(f"Parsing script: {script_path}")
 
     with open(script_path, 'rb') as f:
         data = f.read()
 
-    script = HXBScript()
+    # Auto-detect format
+    if is_spt_file(data):
+        print("Detected: SPT format (Shift-JIS)")
+        script = SPTScript()
+    elif len(data) >= 7 and (data[:4] == b'DDSx' or data[:4] == b'DDWu'):
+        print("Detected: HXB format (UTF-16LE)")
+        if data[:4] == b'DDWu':
+            data = fix_hxb_signature(data)
+            data = decrypt_hxb(data)
+        script = HXBScript()
+    else:
+        print("Unknown script format")
+        return False
+
     if not script.parse(data):
         print("Failed to parse script")
         return False
@@ -875,37 +1287,62 @@ def extract_text(script_path: str, output_path: str) -> bool:
 
 
 def extract_all_text(input_dir: str, output_dir: str) -> bool:
-    """Extract text from all HXB scripts in a directory."""
+    """Extract text from all HXB and SPT scripts in a directory."""
     os.makedirs(output_dir, exist_ok=True)
 
+    # Find both HXB and SPT files
     hxb_files = list(Path(input_dir).glob('*.hxb'))
-    print(f"Found {len(hxb_files)} HXB script files")
+    spt_files = list(Path(input_dir).glob('*.spt'))
+    all_files = hxb_files + spt_files
+
+    print(f"Found {len(hxb_files)} HXB and {len(spt_files)} SPT script files")
 
     total_strings = 0
-    for hxb_path in hxb_files:
-        json_path = Path(output_dir) / (hxb_path.stem + '.json')
+    for script_path in all_files:
+        json_path = Path(output_dir) / (script_path.stem + '.json')
 
-        with open(hxb_path, 'rb') as f:
+        with open(script_path, 'rb') as f:
             data = f.read()
 
-        script = HXBScript()
+        # Auto-detect format
+        if is_spt_file(data):
+            script = SPTScript()
+        else:
+            if data[:4] == b'DDWu':
+                data = fix_hxb_signature(data)
+                data = decrypt_hxb(data)
+            script = HXBScript()
+
         if script.parse(data):
             script.export_strings(str(json_path))
             total_strings += len(script.strings)
-            print(f"  {hxb_path.name}: {len(script.strings)} strings")
+            print(f"  {script_path.name}: {len(script.strings)} strings")
 
     print(f"\nTotal: {total_strings} strings extracted")
     return True
 
 
 def insert_text(script_path: str, translation_path: str, output_path: str) -> bool:
-    """Insert translated text back into an HXB script."""
+    """Insert translated text back into an HXB or SPT script (auto-detect)."""
     print(f"Loading script: {script_path}")
 
     with open(script_path, 'rb') as f:
         data = f.read()
 
-    script = HXBScript()
+    # Auto-detect format
+    if is_spt_file(data):
+        print("Detected: SPT format")
+        script = SPTScript()
+    elif len(data) >= 7 and (data[:4] == b'DDSx' or data[:4] == b'DDWu'):
+        print("Detected: HXB format")
+        if data[:4] == b'DDWu':
+            data = fix_hxb_signature(data)
+            data = decrypt_hxb(data)
+        script = HXBScript()
+    else:
+        print("Unknown script format")
+        return False
+
     if not script.parse(data):
         print("Failed to parse script")
         return False
