@@ -22,6 +22,7 @@ This toolkit supports games built on the **System-NNN** family of visual novel e
 |--------|-----------|----------|------------|-------------|
 | **HXB** | `DDSxHXB` | UTF-16LE | XOR (length-based key) | Main script format for DDSystem/System-NNN |
 | **SPT** | `SPTHEADER0` | Shift-JIS | XOR 0xFF | Script format for newer BlackCyc games |
+| **NNN** | `--MESSAGEDATA` | Shift-JIS | None | Dev script format (VNTranslationTools compatible) |
 
 ### Archive Formats (Currently Implemented)
 
@@ -63,8 +64,11 @@ These formats are used by System-NNN games but not yet implemented in this toolk
 
 - Extract DDP2/DDP3 archives
 - Decompress SHS-compressed files
-- Decrypt HXB script files
+- Decrypt HXB/SPT script files
+- Parse NNN dev scripts
 - Extract translatable text strings to JSON
+- **Translate using LLM APIs** (OpenAI, Anthropic, DeepL, local LLMs)
+- Export in VNTranslationTools-compatible format
 - Reinsert translated text
 - Repack archives for creating translation patches
 
@@ -126,11 +130,31 @@ This creates JSON files with all translatable strings:
 
 ### 3. Translate
 
-Fill in the `"translated"` field for each string in the JSON files. You can use:
-- Manual translation
-- DeepL API
-- Google Translate API
-- Any other translation service
+You can translate manually or use the built-in LLM translation:
+
+```bash
+# Translate with OpenAI GPT-4
+python3 systemnnn_tools.py translate translations/ -o translated/ --api openai
+
+# Translate with Anthropic Claude
+python3 systemnnn_tools.py translate translations/ -o translated/ --api anthropic
+
+# Translate with DeepL
+python3 systemnnn_tools.py translate translations/ -o translated/ --api deepl --lang Portuguese
+
+# Translate with local LLM (Ollama, LM Studio, etc.)
+python3 systemnnn_tools.py translate translations/ -o translated/ --api openai-compatible --base-url http://localhost:11434/v1
+
+# Translate a single file
+python3 systemnnn_tools.py translate main05.json -o main05_translated.json --api openai
+```
+
+**API Keys**: Set via environment variables or `--api-key`:
+- `OPENAI_API_KEY` - OpenAI
+- `ANTHROPIC_API_KEY` - Anthropic
+- `DEEPL_API_KEY` - DeepL
+
+Or translate manually by filling in the `"translated"` field for each string in the JSON files.
 
 ### 4. Insert Translations
 
@@ -250,10 +274,41 @@ Uses SHS Compression (LZSS variant) - same as GARbro implementation. Features:
 - Extended literal count encodings
 - Back-reference with overlap support
 
+### VNTranslationTools Compatibility
+
+Export to VNTranslationTools format for use with py3TranslateLLM:
+
+```bash
+# Extract in VNT format
+python3 systemnnn_tools.py extract-text scripts/ -o translations/ --format vnt
+
+# Convert existing JSON to VNT format
+python3 systemnnn_tools.py convert-format input.json -o output.json --format vnt
+```
+
+VNT format structure:
+```json
+[
+  {"name": "Character", "message": "Dialogue text"},
+  {"message": "Narration without speaker"}
+]
+```
+
+## Related Tools
+
+| Tool | Purpose |
+|------|---------|
+| [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) | Alternative script extractor/patcher |
+| [py3TranslateLLM](https://github.com/gdiaz384/py3TranslateLLM) | LLM translation for spreadsheets |
+| [LunaTranslator](https://github.com/HIllya51/LunaTranslator) | Real-time translation while playing |
+| [GARbro](https://github.com/morkt/GARbro) | Universal VN resource browser |
+
 ## Thanks
 
 - [GARbro](https://github.com/morkt/GARbro) by morkt - Format specifications and compression algorithms
 - [systemNNN_support](https://github.com/tinyan/systemNNN_support) by tinyan - Engine tools and format documentation (DWQ, VAW, MFT formats)
+- [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) by arcusmaximus - NNN/SPT format reference
+- [py3TranslateLLM](https://github.com/gdiaz384/py3TranslateLLM) by gdiaz384 - Translation workflow inspiration
 - PIL/SLASH/BlackCyc/CYCLET - For creating amazing visual novels
 
 ## License

@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
 SystemNNN/PIL/SLASH Visual Novel Tools
-Supports DDP2/DDP3 archives and HXB script files
+Supports DDP2/DDP3 archives, HXB/SPT/NNN script files, and LLM translation
 
 Tools for:
 - Extracting DDP2/DDP3 archives
 - Parsing HXB scripts and extracting translatable text (UTF-16LE)
-- Reinserting translated text into HXB scripts
+- Parsing SPT scripts (Shift-JIS, XOR 0xFF encrypted)
+- Parsing NNN dev scripts (--MESSAGEDATA/-COMMANDDATA format)
+- Translating text using LLM APIs (OpenAI, Anthropic, DeepL, local)
+- Reinserting translated text into scripts
 - Repacking DDP archives
 
 Based on GARbro's format specifications and reverse engineering
 
-Tested with: Shingakkou (神学校 -Noli me tangere-)
+Tested with: Shingakkou (神学校 -Noli me tangere-), Mugen Kairou 2
 """
 
 import struct
@@ -19,8 +22,10 @@ import os
 import sys
 import json
 import argparse
+import time
+import re
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, BinaryIO
+from typing import List, Dict, Tuple, Optional, BinaryIO, Any
 from dataclasses import dataclass, field
 
 
@@ -1385,6 +1390,562 @@ def repack_archive(input_dir: str, output_path: str, version: int = 3, compress:
 
 
 # =============================================================================
+# NNN Dev Script Parser (VNTranslationTools compatible)
+# =============================================================================
+
+@dataclass
+class NNNString:
+    """Represents an extractable text string from NNN dev script."""
+    index: int
+    offset: int
+    original: str
+    translated: str = ""
+    context: str = ""
+    message_type: str = "message"  # "message" or "command"
+
+
+class NNNScript:
+    """
+    Parser for NNN dev script files.
+    Uses --MESSAGEDATA and -COMMANDDATA headers.
+    Text is Shift-JIS encoded.
+    """
+
+    MESSAGEDATA_HEADER = b'--MESSAGEDATA  \x00'
+    COMMANDDATA_HEADER = b'-COMMANDDATA   \x00'
+
+    def __init__(self):
+        self.strings: List[NNNString] = []
+        self.raw_data: bytes = b''
+
+    def parse(self, data: bytes) -> bool:
+        """Parse NNN dev script and extract text strings."""
+        self.raw_data = data
+        idx = 0
+
+        # Find MESSAGEDATA sections
+        pos = 0
+        while True:
+            msg_pos = data.find(self.MESSAGEDATA_HEADER, pos)
+            if msg_pos == -1:
+                break
+
+            # Read message data structure
+            # At offset +0x50: buffer offset, +0x3C: length
+            if msg_pos + 0x60 < len(data):
+                try:
+                    buffer_offset = read_uint32_le(data, msg_pos + 0x50)
+                    text_length = read_uint32_le(data, msg_pos + 0x3C)
+
+                    if buffer_offset > 0 and text_length > 0 and buffer_offset + text_length <= len(data):
+                        text_data = data[buffer_offset:buffer_offset + text_length]
+                        # Remove null terminator
+                        text_data = text_data.rstrip(b'\x00')
+
+                        try:
+                            text = text_data.decode('shift-jis', errors='replace')
+                            if text and len(text) >= 2:
+                                self.strings.append(NNNString(
+                                    index=idx,
+                                    offset=buffer_offset,
+                                    original=text,
+                                    message_type="message"
+                                ))
+                                idx += 1
+                        except:
+                            pass
+                except:
+                    pass
+
+            pos = msg_pos + len(self.MESSAGEDATA_HEADER)
+
+        # Find COMMANDDATA sections (for choices, etc.)
+        pos = 0
+        while True:
+            cmd_pos = data.find(self.COMMANDDATA_HEADER, pos)
+            if cmd_pos == -1:
+                break
+
+            # Check for "Case" type commands at +0x60, length at +0x24
+            if cmd_pos + 0x70 < len(data):
+                try:
+                    text_offset = cmd_pos + 0x60
+                    text_length = read_uint32_le(data, cmd_pos + 0x24)
+
+                    if text_length > 0 and text_offset + text_length <= len(data):
+                        text_data = data[text_offset:text_offset + text_length]
+                        text_data = text_data.rstrip(b'\x00')
+
+                        try:
+                            text = text_data.decode('shift-jis', errors='replace')
+                            if text and len(text) >= 2:
+                                self.strings.append(NNNString(
+                                    index=idx,
+                                    offset=text_offset,
+                                    original=text,
+                                    message_type="command"
+                                ))
+                                idx += 1
+                        except:
+                            pass
+                except:
+                    pass
+
+            pos = cmd_pos + len(self.COMMANDDATA_HEADER)
+
+        return len(self.strings) > 0
+
+    def export_strings(self, filepath: str, format: str = "vntools"):
+        """Export strings to JSON for translation.
+
+        Args:
+            filepath: Output file path
+            format: "vntools" (default) or "vnt" (VNTranslationTools compatible)
+        """
+        if format == "vnt":
+            # VNTranslationTools format: [{"name": "...", "message": "..."}]
+            export_data = []
+            for s in self.strings:
+                # Try to split name and message if there's a newline
+                if '\n' in s.original:
+                    parts = s.original.split('\n', 1)
+                    export_data.append({
+                        "name": parts[0].strip(),
+                        "message": parts[1].strip() if len(parts) > 1 else ""
+                    })
+                else:
+                    export_data.append({"message": s.original})
+        else:
+            # VNTools format
+            export_data = {
+                'source_file': '',
+                'format': 'nnn-shiftjis',
+                'string_count': len(self.strings),
+                'strings': [
+                    {
+                        'index': s.index,
+                        'offset': s.offset,
+                        'original': s.original,
+                        'translated': s.translated,
+                        'context': s.context,
+                        'type': s.message_type
+                    }
+                    for s in self.strings
+                ]
+            }
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+    def import_strings(self, filepath: str):
+        """Import translated strings from JSON."""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            import_data = json.load(f)
+
+        # Handle both VNTools and VNT formats
+        if isinstance(import_data, list):
+            # VNT format
+            for i, item in enumerate(import_data):
+                if i < len(self.strings):
+                    translated = item.get('translated', item.get('message', ''))
+                    if translated:
+                        self.strings[i].translated = translated
+        else:
+            # VNTools format
+            translation_map = {
+                s['index']: s.get('translated', '')
+                for s in import_data.get('strings', [])
+            }
+            for string in self.strings:
+                if string.index in translation_map:
+                    string.translated = translation_map[string.index]
+
+    def rebuild(self) -> bytes:
+        """Rebuild NNN file with translated strings."""
+        result = bytearray(self.raw_data)
+
+        sorted_strings = sorted(self.strings, key=lambda s: s.offset, reverse=True)
+
+        for string in sorted_strings:
+            if not string.translated:
+                continue
+
+            # Find original string end
+            orig_end = string.offset
+            while orig_end < len(result) and result[orig_end] != 0:
+                orig_end += 1
+
+            try:
+                new_bytes = string.translated.encode('shift-jis')
+            except UnicodeEncodeError:
+                print(f"Warning: Could not encode string at index {string.index}")
+                continue
+
+            result[string.offset:orig_end] = new_bytes
+
+        return bytes(result)
+
+
+def is_nnn_file(data: bytes) -> bool:
+    """Check if data is an NNN dev script file."""
+    return (b'--MESSAGEDATA' in data[:0x1000] or
+            b'-COMMANDDATA' in data[:0x1000])
+
+
+# =============================================================================
+# LLM Translation Engine
+# =============================================================================
+
+class TranslationCache:
+    """Simple cache to avoid re-translating identical strings."""
+
+    def __init__(self, cache_file: Optional[str] = None):
+        self.cache: Dict[str, str] = {}
+        self.cache_file = cache_file
+        if cache_file and os.path.exists(cache_file):
+            self._load()
+
+    def _load(self):
+        try:
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
+                self.cache = json.load(f)
+        except:
+            self.cache = {}
+
+    def save(self):
+        if self.cache_file:
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, ensure_ascii=False, indent=2)
+
+    def get(self, text: str) -> Optional[str]:
+        return self.cache.get(text)
+
+    def set(self, original: str, translated: str):
+        self.cache[original] = translated
+
+
+class LLMTranslator:
+    """Base class for LLM-based translation."""
+
+    def __init__(self,
+                 api_key: Optional[str] = None,
+                 model: str = "",
+                 base_url: Optional[str] = None,
+                 target_lang: str = "English",
+                 context: str = ""):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url
+        self.target_lang = target_lang
+        self.context = context
+        self.cache = TranslationCache()
+
+    def translate_batch(self, texts: List[str], batch_size: int = 10) -> List[str]:
+        """Translate a batch of texts."""
+        results = []
+
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            batch_results = []
+
+            for text in batch:
+                # Check cache first
+                cached = self.cache.get(text)
+                if cached:
+                    batch_results.append(cached)
+                    continue
+
+                # Translate
+                try:
+                    translated = self._translate_single(text)
+                    self.cache.set(text, translated)
+                    batch_results.append(translated)
+                except Exception as e:
+                    print(f"Translation error: {e}")
+                    batch_results.append("")
+
+                # Rate limiting
+                time.sleep(0.5)
+
+            results.extend(batch_results)
+            print(f"  Translated {min(i + batch_size, len(texts))}/{len(texts)}")
+
+        self.cache.save()
+        return results
+
+    def _translate_single(self, text: str) -> str:
+        """Translate a single text. Override in subclasses."""
+        raise NotImplementedError
+
+    def _build_prompt(self, text: str) -> str:
+        """Build translation prompt."""
+        context_str = f"\nContext: {self.context}" if self.context else ""
+        return f"""Translate the following Japanese visual novel text to {self.target_lang}.
+Preserve the original meaning and tone. Keep character names unchanged.
+Maintain any formatting like newlines.{context_str}
+
+Japanese text:
+{text}
+
+{self.target_lang} translation:"""
+
+
+class OpenAITranslator(LLMTranslator):
+    """OpenAI API translator (also works with compatible APIs)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model = self.model or "gpt-4o-mini"
+        self.base_url = self.base_url or "https://api.openai.com/v1"
+
+    def _translate_single(self, text: str) -> str:
+        try:
+            import urllib.request
+            import urllib.error
+        except ImportError:
+            raise RuntimeError("urllib required for API calls")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+
+        data = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": f"You are a professional Japanese to {self.target_lang} translator specializing in visual novels. Translate accurately while preserving the original tone and style."},
+                {"role": "user", "content": self._build_prompt(text)}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 2000
+        }
+
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(data).encode('utf-8'),
+            headers=headers,
+            method='POST'
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return result['choices'][0]['message']['content'].strip()
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8') if e.fp else str(e)
+            raise RuntimeError(f"API error {e.code}: {error_body}")
+
+
+class AnthropicTranslator(LLMTranslator):
+    """Anthropic Claude API translator."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model = self.model or "claude-3-haiku-20240307"
+        self.base_url = "https://api.anthropic.com/v1"
+
+    def _translate_single(self, text: str) -> str:
+        try:
+            import urllib.request
+            import urllib.error
+        except ImportError:
+            raise RuntimeError("urllib required for API calls")
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01"
+        }
+
+        data = {
+            "model": self.model,
+            "max_tokens": 2000,
+            "messages": [
+                {"role": "user", "content": self._build_prompt(text)}
+            ]
+        }
+
+        req = urllib.request.Request(
+            f"{self.base_url}/messages",
+            data=json.dumps(data).encode('utf-8'),
+            headers=headers,
+            method='POST'
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return result['content'][0]['text'].strip()
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8') if e.fp else str(e)
+            raise RuntimeError(f"API error {e.code}: {error_body}")
+
+
+class DeepLTranslator(LLMTranslator):
+    """DeepL API translator."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Detect if using free or pro API
+        if self.api_key and self.api_key.endswith(':fx'):
+            self.base_url = "https://api-free.deepl.com/v2"
+        else:
+            self.base_url = "https://api.deepl.com/v2"
+
+        # Map language names to DeepL codes
+        self.lang_map = {
+            "english": "EN",
+            "portuguese": "PT-BR",
+            "spanish": "ES",
+            "french": "FR",
+            "german": "DE",
+            "italian": "IT",
+            "dutch": "NL",
+            "polish": "PL",
+            "russian": "RU",
+            "chinese": "ZH",
+            "korean": "KO"
+        }
+
+    def _translate_single(self, text: str) -> str:
+        try:
+            import urllib.request
+            import urllib.error
+            import urllib.parse
+        except ImportError:
+            raise RuntimeError("urllib required for API calls")
+
+        target_lang = self.lang_map.get(self.target_lang.lower(), "EN")
+
+        data = urllib.parse.urlencode({
+            "auth_key": self.api_key,
+            "text": text,
+            "source_lang": "JA",
+            "target_lang": target_lang
+        }).encode('utf-8')
+
+        req = urllib.request.Request(
+            f"{self.base_url}/translate",
+            data=data,
+            method='POST'
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return result['translations'][0]['text']
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8') if e.fp else str(e)
+            raise RuntimeError(f"API error {e.code}: {error_body}")
+
+
+def get_translator(api: str, **kwargs) -> LLMTranslator:
+    """Factory function to get the appropriate translator."""
+    translators = {
+        "openai": OpenAITranslator,
+        "anthropic": AnthropicTranslator,
+        "deepl": DeepLTranslator,
+        "openai-compatible": OpenAITranslator,  # Same as OpenAI but with custom base_url
+    }
+
+    if api not in translators:
+        raise ValueError(f"Unknown API: {api}. Available: {list(translators.keys())}")
+
+    return translators[api](**kwargs)
+
+
+def translate_json_file(input_path: str, output_path: str, translator: LLMTranslator) -> bool:
+    """Translate a JSON file containing extracted strings."""
+    print(f"Loading: {input_path}")
+
+    with open(input_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    # Handle both VNTools and VNT formats
+    if isinstance(data, list):
+        # VNT format
+        texts = [item.get('message', '') for item in data]
+        print(f"Found {len(texts)} strings (VNT format)")
+
+        translations = translator.translate_batch(texts)
+
+        for i, item in enumerate(data):
+            if translations[i]:
+                item['translated'] = translations[i]
+    else:
+        # VNTools format
+        strings = data.get('strings', [])
+        texts = [s.get('original', '') for s in strings if not s.get('translated')]
+        print(f"Found {len(texts)} untranslated strings")
+
+        if not texts:
+            print("All strings already translated!")
+            return True
+
+        translations = translator.translate_batch(texts)
+
+        trans_idx = 0
+        for s in strings:
+            if not s.get('translated') and trans_idx < len(translations):
+                s['translated'] = translations[trans_idx]
+                trans_idx += 1
+
+    # Save
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    print(f"Saved to: {output_path}")
+    return True
+
+
+def translate_directory(input_dir: str, output_dir: str, translator: LLMTranslator) -> bool:
+    """Translate all JSON files in a directory."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    json_files = list(Path(input_dir).glob('*.json'))
+    print(f"Found {len(json_files)} JSON files")
+
+    for json_file in json_files:
+        output_file = Path(output_dir) / json_file.name
+        translate_json_file(str(json_file), str(output_file), translator)
+
+    return True
+
+
+# =============================================================================
+# Export Format Conversion
+# =============================================================================
+
+def convert_to_vnt_format(input_path: str, output_path: str) -> bool:
+    """Convert VNTools JSON to VNTranslationTools format."""
+    with open(input_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    if isinstance(data, list):
+        print("Already in VNT format")
+        return False
+
+    vnt_data = []
+    for s in data.get('strings', []):
+        original = s.get('original', '')
+        # Try to split name and message
+        if '\n' in original:
+            parts = original.split('\n', 1)
+            vnt_data.append({
+                "name": parts[0].strip(),
+                "message": parts[1].strip() if len(parts) > 1 else ""
+            })
+        else:
+            vnt_data.append({"message": original})
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(vnt_data, f, ensure_ascii=False, indent=2)
+
+    print(f"Converted {len(vnt_data)} strings to VNT format")
+    return True
+
+
+# =============================================================================
 # CLI Interface
 # =============================================================================
 
@@ -1400,14 +1961,34 @@ Examples:
   # Extract text from all scripts
   %(prog)s extract-text extracted/ -o translations/
 
+  # Translate with OpenAI
+  %(prog)s translate translations/ -o translated/ --api openai
+
+  # Translate with Claude
+  %(prog)s translate translations/ -o translated/ --api anthropic
+
+  # Translate with local LLM (Ollama, LM Studio, etc.)
+  %(prog)s translate translations/ -o translated/ --api openai-compatible --base-url http://localhost:11434/v1
+
+  # Translate with DeepL
+  %(prog)s translate translations/ -o translated/ --api deepl --lang Portuguese
+
   # Insert translations and create patched scripts
   %(prog)s insert-text extracted/main05.hxb translations/main05.json -o patched/main05.hxb
 
   # Repack archive
   %(prog)s repack patched/ -o archive_patched.dat
 
+  # Convert JSON to VNTranslationTools format
+  %(prog)s convert-format input.json -o output.json --format vnt
+
   # Analyze archive
   %(prog)s analyze archive.dat
+
+Environment variables for API keys:
+  OPENAI_API_KEY      - OpenAI API key
+  ANTHROPIC_API_KEY   - Anthropic API key
+  DEEPL_API_KEY       - DeepL API key
 '''
     )
 
@@ -1420,15 +2001,37 @@ Examples:
     extract_parser.add_argument('--no-decrypt', action='store_true', help='Do not decrypt HXB files')
 
     # Extract text command
-    extract_text_parser = subparsers.add_parser('extract-text', help='Extract text from HXB scripts')
-    extract_text_parser.add_argument('input', help='HXB file or directory')
+    extract_text_parser = subparsers.add_parser('extract-text', help='Extract text from scripts (HXB/SPT/NNN)')
+    extract_text_parser.add_argument('input', help='Script file or directory')
     extract_text_parser.add_argument('-o', '--output', help='Output JSON file or directory')
+    extract_text_parser.add_argument('--format', choices=['vntools', 'vnt'], default='vntools',
+                                     help='Output format: vntools (default) or vnt (VNTranslationTools)')
+
+    # Translate command (NEW!)
+    translate_parser = subparsers.add_parser('translate', help='Translate JSON files using LLM APIs')
+    translate_parser.add_argument('input', help='JSON file or directory')
+    translate_parser.add_argument('-o', '--output', help='Output JSON file or directory')
+    translate_parser.add_argument('--api', required=True,
+                                  choices=['openai', 'anthropic', 'deepl', 'openai-compatible'],
+                                  help='Translation API to use')
+    translate_parser.add_argument('--api-key', help='API key (or use environment variable)')
+    translate_parser.add_argument('--model', help='Model name (optional, uses default)')
+    translate_parser.add_argument('--base-url', help='Base URL for OpenAI-compatible APIs')
+    translate_parser.add_argument('--lang', default='English', help='Target language (default: English)')
+    translate_parser.add_argument('--context', default='', help='Additional context for translation')
+
+    # Convert format command (NEW!)
+    convert_parser = subparsers.add_parser('convert-format', help='Convert between JSON formats')
+    convert_parser.add_argument('input', help='Input JSON file')
+    convert_parser.add_argument('-o', '--output', required=True, help='Output JSON file')
+    convert_parser.add_argument('--format', choices=['vnt', 'vntools'], default='vnt',
+                                help='Target format: vnt (VNTranslationTools) or vntools')
 
     # Insert text command
-    insert_parser = subparsers.add_parser('insert-text', help='Insert translated text into HXB')
-    insert_parser.add_argument('script', help='Original HXB script')
+    insert_parser = subparsers.add_parser('insert-text', help='Insert translated text into scripts')
+    insert_parser.add_argument('script', help='Original script file')
     insert_parser.add_argument('translation', help='Translation JSON file')
-    insert_parser.add_argument('-o', '--output', required=True, help='Output HXB file')
+    insert_parser.add_argument('-o', '--output', required=True, help='Output script file')
 
     # Repack command
     repack_parser = subparsers.add_parser('repack', help='Repack files into DDP archive')
@@ -1449,12 +2052,79 @@ Examples:
 
     elif args.command == 'extract-text':
         input_path = Path(args.input)
+        output_format = getattr(args, 'format', 'vntools')
+
         if input_path.is_dir():
             output = args.output or str(input_path) + '_text'
-            extract_all_text(str(input_path), output)
+            extract_all_text_with_format(str(input_path), output, output_format)
         else:
             output = args.output or str(input_path.with_suffix('.json'))
-            extract_text(str(input_path), output)
+            extract_text_with_format(str(input_path), output, output_format)
+
+    elif args.command == 'translate':
+        # Get API key from args or environment
+        api_key = args.api_key
+        if not api_key:
+            env_keys = {
+                'openai': 'OPENAI_API_KEY',
+                'openai-compatible': 'OPENAI_API_KEY',
+                'anthropic': 'ANTHROPIC_API_KEY',
+                'deepl': 'DEEPL_API_KEY'
+            }
+            env_var = env_keys.get(args.api)
+            api_key = os.environ.get(env_var, '')
+
+        if not api_key:
+            print(f"Error: API key required. Set {env_keys.get(args.api)} or use --api-key")
+            sys.exit(1)
+
+        # Create translator
+        translator = get_translator(
+            args.api,
+            api_key=api_key,
+            model=args.model or "",
+            base_url=args.base_url,
+            target_lang=args.lang,
+            context=args.context
+        )
+
+        input_path = Path(args.input)
+        if input_path.is_dir():
+            output = args.output or str(input_path) + '_translated'
+            translate_directory(str(input_path), output, translator)
+        else:
+            output = args.output or str(input_path.with_stem(input_path.stem + '_translated'))
+            translate_json_file(str(input_path), output, translator)
+
+    elif args.command == 'convert-format':
+        if args.format == 'vnt':
+            convert_to_vnt_format(args.input, args.output)
+        else:
+            # Convert VNT to VNTools format
+            with open(args.input, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if isinstance(data, list):
+                vntools_data = {
+                    'source_file': '',
+                    'format': 'converted-from-vnt',
+                    'string_count': len(data),
+                    'strings': [
+                        {
+                            'index': i,
+                            'offset': 0,
+                            'original': item.get('message', ''),
+                            'translated': item.get('translated', ''),
+                            'context': item.get('name', '')
+                        }
+                        for i, item in enumerate(data)
+                    ]
+                }
+                with open(args.output, 'w', encoding='utf-8') as f:
+                    json.dump(vntools_data, f, ensure_ascii=False, indent=2)
+                print(f"Converted {len(data)} strings to VNTools format")
+            else:
+                print("Already in VNTools format")
 
     elif args.command == 'insert-text':
         insert_text(args.script, args.translation, args.output)
@@ -1475,6 +2145,70 @@ Examples:
                 print(f"  ... and {len(archive.entries) - 20} more")
     else:
         parser.print_help()
+
+
+def extract_text_with_format(script_path: str, output_path: str, format: str = "vntools") -> bool:
+    """Extract translatable text from a script with format option."""
+    print(f"Parsing script: {script_path}")
+
+    with open(script_path, 'rb') as f:
+        data = f.read()
+
+    # Auto-detect format
+    if is_nnn_file(data):
+        print("Detected: NNN dev format (Shift-JIS)")
+        script = NNNScript()
+    elif is_spt_file(data):
+        print("Detected: SPT format (Shift-JIS)")
+        script = SPTScript()
+    elif len(data) >= 7 and (data[:4] == b'DDSx' or data[:4] == b'DDWu'):
+        print("Detected: HXB format (UTF-16LE)")
+        if data[:4] == b'DDWu':
+            data = fix_hxb_signature(data)
+            data = decrypt_hxb(data)
+        script = HXBScript()
+    else:
+        print("Unknown script format")
+        return False
+
+    if not script.parse(data):
+        print("Failed to parse script")
+        return False
+
+    print(f"Found {len(script.strings)} text strings")
+
+    # Export with format option
+    if hasattr(script, 'export_strings'):
+        if isinstance(script, NNNScript):
+            script.export_strings(output_path, format)
+        else:
+            script.export_strings(output_path)
+            # Convert if VNT format requested
+            if format == 'vnt':
+                convert_to_vnt_format(output_path, output_path)
+
+    print(f"Exported to: {output_path}")
+    return True
+
+
+def extract_all_text_with_format(input_dir: str, output_dir: str, format: str = "vntools") -> bool:
+    """Extract text from all scripts in a directory with format option."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Find all script files
+    hxb_files = list(Path(input_dir).glob('*.hxb'))
+    spt_files = list(Path(input_dir).glob('*.spt'))
+    nnn_files = list(Path(input_dir).glob('*.nnn'))
+    all_files = hxb_files + spt_files + nnn_files
+
+    print(f"Found {len(hxb_files)} HXB, {len(spt_files)} SPT, {len(nnn_files)} NNN files")
+
+    total_strings = 0
+    for script_path in all_files:
+        json_path = Path(output_dir) / (script_path.stem + '.json')
+        extract_text_with_format(str(script_path), str(json_path), format)
+
+    return True
 
 
 if __name__ == '__main__':
