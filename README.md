@@ -103,7 +103,68 @@ cd VNTools
 # No additional dependencies required - uses only standard library
 ```
 
-## Usage
+## Web GUI 🎨
+
+VNTools now includes a beautiful web-based GUI with full Tailwind styling!
+
+### Quick Start
+
+```bash
+# Install Flask dependencies
+pip install -r requirements.txt
+
+# Start the web server
+python3 app.py
+```
+
+Then open your browser to http://localhost:5000
+
+### GUI Features
+
+The web interface provides access to ALL VNTools functionality:
+
+- **📦 Archives Tab**
+  - Extract DDP2/DDP3 archives with drag-and-drop
+  - Repack modified files back to archives
+  - Analyze archive contents and compression ratios
+
+- **📝 Scripts Tab**
+  - Decrypt HXB/SPT/NNN scripts
+  - Encrypt text files back to game format
+  - Live preview of decrypted content
+
+- **🌐 Text Extraction Tab**
+  - Extract translatable strings to JSON
+  - Insert translated text back into scripts
+  - Preview extracted text
+
+- **🤖 AI Translation Tab**
+  - Translate using OpenAI, Anthropic, or DeepL
+  - SJIS Tunneling support
+  - GPT Dictionary integration
+  - Automated Translation QA
+  - Real-time progress tracking
+
+- **⚙️ Advanced Tools Tab**
+  - SJIS Tunneling encoder/decoder
+  - Word wrapping with configurable width
+  - Format conversion (VNT compatibility)
+  - Character name management
+
+- **❓ Help Tab**
+  - Complete documentation
+  - Quick start guide
+  - Pro tips and best practices
+
+### Why Use the GUI?
+
+- **User-Friendly**: No command-line experience needed
+- **Visual**: See previews and results in real-time
+- **Drag & Drop**: Easy file uploads
+- **Modern**: Beautiful Tailwind-inspired design
+- **Complete**: Every CLI feature available in the GUI
+
+## CLI Usage
 
 ### 1. Extract Archive
 
