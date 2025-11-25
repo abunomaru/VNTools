@@ -62,6 +62,7 @@ These formats are used by System-NNN games but not yet implemented in this toolk
 
 ## Features
 
+### Core Features
 - Extract DDP2/DDP3 archives
 - Decompress SHS-compressed files
 - Decrypt HXB/SPT script files
@@ -71,6 +72,24 @@ These formats are used by System-NNN games but not yet implemented in this toolk
 - Export in VNTranslationTools-compatible format
 - Reinsert translated text
 - Repack archives for creating translation patches
+
+### Advanced Translation Features ⭐ NEW
+- **SJIS Tunneling** - Map unsupported characters to unused Shift-JIS code points (solves punctuation display issues in System-NNN games)
+- **GPT Dictionary System** - Maintain consistent terminology and character name translations
+  - Pre-translation hints (Japanese term recognition)
+  - Post-translation enforcement (required translations)
+  - Conditional translations (context-specific)
+  - Character background/personality contexts
+- **Translation QA** - Automated quality validation
+  - Detects repeated words, unbalanced punctuation
+  - Flags untranslated Japanese characters
+  - Checks line break consistency
+  - Validates translation length
+  - Dictionary compliance checking
+- **Character Name Management** - Reusable character name database
+- **Word Wrapping** - Automatic line breaking for monospace/proportional fonts
+- **Checkpoint System** - Save and resume interrupted translations
+- **Translation Caching** - Avoid re-translating identical strings
 
 ## Installation
 
@@ -190,6 +209,245 @@ python3 systemnnn_tools.py analyze sin_text.dat
 6. **Repack**: `python3 systemnnn_tools.py repack patched/ -o archive_patched.dat`
 7. **Replace** original archive with patched version
 
+## Advanced Features Usage
+
+### SJIS Tunneling (Fixing Punctuation Display Issues)
+
+The SJIS tunneling system solves the punctuation display problems reported in System-NNN games like Mugen Kairou 2. It maps unsupported characters (Western punctuation, accents) to unused Shift-JIS code points.
+
+**Python API Usage:**
+```python
+from systemnnn_tools import SJISTunnelEncoder
+
+# Create encoder
+encoder = SJISTunnelEncoder()
+
+# Encode text with tunneling
+japanese_text = "こんにちは"
+english_text = "Hello! How's it going?"
+
+# English punctuation will be tunneled
+encoded = encoder.encode(english_text)
+
+# Save mapping for game runtime (use with VNTextProxy or similar)
+encoder.save_mapping("sjis_ext.bin")
+
+# Decode back
+decoded = encoder.decode(encoded)
+
+# Get statistics
+stats = encoder.get_stats()
+print(f"Mapped {stats['mapped_chars']} characters")
+print(f"{stats['available_slots']} slots remaining")
+```
+
+**What it does:**
+- Maps unsupported characters to unused SJIS byte ranges (0x81-0x9F, 0xE0-0xEC)
+- Generates `sjis_ext.bin` mapping file (compatible with VNTextProxy)
+- Supports ~4000+ character mappings
+- Preserves standard SJIS characters unchanged
+
+### GPT Dictionary System
+
+Maintain consistent translations of character names, terminology, and context-specific phrases.
+
+**Setup (`gpt_dictionary.json`):**
+```json
+{
+  "pre_translation": {
+    "神学校": "Theological school/seminary (important location)",
+    "エルバート": "Elbert (male protagonist, cynical personality)"
+  },
+  "post_translation": {
+    "エルバート": "Elbert",
+    "レオニード": "Leonid",
+    "神学校": "Seminary"
+  },
+  "conditional": {
+    "chapter1": {
+      "教室": "classroom"
+    },
+    "chapter5": {
+      "教室": "lecture hall"
+    }
+  },
+  "character_contexts": {
+    "Elbert": "Male protagonist, cynical theology student, has a dark past",
+    "Leonid": "Elbert's mentor, strict but caring priest"
+  }
+}
+```
+
+**Python API Usage:**
+```python
+from systemnnn_tools import GPTDictionary
+
+# Load dictionary
+dictionary = GPTDictionary('gpt_dictionary.json')
+
+# Add entries programmatically
+dictionary.add_character_context("Elbert", "Male protagonist, theology student")
+dictionary.add_post_translation("エルバート", "Elbert")
+dictionary.add_conditional("chapter1", "教室", "classroom")
+
+# Get prompt context for LLM
+context = dictionary.get_context_prompt(context="chapter1")
+print(context)
+# Output includes character backgrounds and required translations
+
+# Apply post-processing (enforce dictionary terms)
+translated = "エルバート went to the seminary"
+fixed = dictionary.apply_post_processing(translated)
+# Result: "Elbert went to the seminary"
+
+dictionary.save()
+```
+
+### Translation QA (Quality Assurance)
+
+Automatically detect common translation errors.
+
+**Python API Usage:**
+```python
+from systemnnn_tools import TranslationQA, GPTDictionary
+
+# Create QA validator
+dictionary = GPTDictionary('gpt_dictionary.json')
+qa = TranslationQA(dictionary=dictionary)
+
+# Validate translations
+original = "エルバートは神学校に行った。"
+translated = "Elbert Elbert Elbert went to school."
+
+issues = qa.validate(original, translated, index=0)
+for issue in issues:
+    print(f"⚠ {issue}")
+# Output:
+# ⚠ Repeated word: 'Elbert'
+# ⚠ Missing required translation: 神学校 → Seminary
+
+# Generate full report
+qa.validate(original, translated, index=0)
+qa.validate(original2, translated2, index=1)
+# ... validate more strings ...
+
+print(qa.generate_report())
+# Outputs formatted report with all issues
+
+qa.clear()  # Clear for next batch
+```
+
+**Checks performed:**
+- Repeated words (3+ consecutive)
+- Untranslated Japanese characters
+- Unbalanced punctuation: `() [] {} 「」 『』`
+- Line break count mismatches
+- Translation length (too long/short)
+- Empty translations
+- Dictionary compliance
+
+### Character Name Management
+
+Maintain a reusable database of character name translations.
+
+**Setup (`names.json`):**
+```json
+{
+  "エルバート": "Elbert",
+  "レオニード": "Leonid",
+  "マリア": "Maria",
+  "セシル": "Cecil"
+}
+```
+
+**Python API Usage:**
+```python
+from systemnnn_tools import CharacterNameManager
+
+# Load name database
+names = CharacterNameManager('names.json')
+
+# Add names
+names.add_name("エルバート", "Elbert")
+names.add_name("レオニード", "Leonid")
+
+# Get translation
+translated_name = names.get_translation("エルバート")
+# Returns: "Elbert"
+
+# Extract names from VNT-format JSON
+with open('translations.json') as f:
+    data = json.load(f)
+names.extract_names_from_json(data)  # Extracts all "name" fields
+
+# Auto-fill translations in JSON data
+data = names.auto_translate_names(data)
+
+names.save()
+```
+
+### Word Wrapping
+
+Prevent text overflow in VN text boxes.
+
+**Python API Usage:**
+```python
+from systemnnn_tools import WordWrapper
+
+# Monospace font (typical for Japanese VNs)
+wrapper = WordWrapper(chars_per_line=40, mode='monospace')
+
+long_text = "This is a very long line of text that needs to be wrapped to fit within the game's text box constraints."
+wrapped = wrapper.wrap(long_text)
+print(wrapped)
+# Output:
+# This is a very long line of text
+# that needs to be wrapped to fit within
+# the game's text box constraints.
+
+line_count = wrapper.calculate_line_count(wrapped)
+print(f"Text occupies {line_count} lines")
+
+# Proportional font (for English translations)
+wrapper_prop = WordWrapper(chars_per_line=50, mode='proportional')
+wrapped_prop = wrapper_prop.wrap(long_text)
+# Uses character width estimates for better wrapping
+```
+
+### Checkpoint System
+
+Save and resume translation progress.
+
+**Python API Usage:**
+```python
+from systemnnn_tools import CheckpointManager
+
+checkpoint_mgr = CheckpointManager('.checkpoints')
+
+# Save checkpoint during translation
+project_data = {
+    'completed_files': ['main01.json', 'main02.json'],
+    'current_file': 'main03.json',
+    'current_index': 150,
+    'translation_cache': { ... }
+}
+checkpoint_mgr.save_checkpoint('shingakkou_translation', project_data)
+
+# Resume from checkpoint
+data = checkpoint_mgr.load_checkpoint('shingakkou_translation')
+if data:
+    print(f"Resuming from file: {data['current_file']}")
+    # Continue translation...
+
+# List all checkpoints
+checkpoints = checkpoint_mgr.list_checkpoints()
+for cp in checkpoints:
+    print(f"{cp['project']}: {cp['timestamp']}")
+
+# Delete after completion
+checkpoint_mgr.delete_checkpoint('shingakkou_translation')
+```
+
 ## Technical Details
 
 ### Game Directory Structure
@@ -298,17 +556,32 @@ VNT format structure:
 
 | Tool | Purpose |
 |------|---------|
-| [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) | Alternative script extractor/patcher |
+| [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) | Alternative script extractor/patcher with Excel workflow |
+| [VNTextPatch](https://github.com/rafael-vasconcellos/VNTextPatch-net8) | .NET 8 multi-engine tool (24+ engines, SJIS tunneling) |
+| [vnilla](https://github.com/erengy/vnilla) | Minimal markup language for VN translation projects |
+| [GalTransl](https://github.com/GalTransl/GalTransl) | Advanced LLM translation with GPT dictionary & QA system |
+| [SoraTranslator](https://github.com/Immortalyzy/SoraTranslator) | VN translation with spreadsheet UI and token optimization |
 | [py3TranslateLLM](https://github.com/gdiaz384/py3TranslateLLM) | LLM translation for spreadsheets |
 | [LunaTranslator](https://github.com/HIllya51/LunaTranslator) | Real-time translation while playing |
 | [GARbro](https://github.com/morkt/GARbro) | Universal VN resource browser |
 
 ## Thanks
 
+### Core References
 - [GARbro](https://github.com/morkt/GARbro) by morkt - Format specifications and compression algorithms
 - [systemNNN_support](https://github.com/tinyan/systemNNN_support) by tinyan - Engine tools and format documentation (DWQ, VAW, MFT formats)
 - [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) by arcusmaximus - NNN/SPT format reference
 - [py3TranslateLLM](https://github.com/gdiaz384/py3TranslateLLM) by gdiaz384 - Translation workflow inspiration
+
+### Advanced Features Inspiration
+- [VNTextPatch](https://github.com/rafael-vasconcellos/VNTextPatch-net8) by rafael-vasconcellos - SJIS tunneling technique, word wrapping, character name management
+- [GalTransl](https://github.com/GalTransl/GalTransl) by GalTransl team - GPT dictionary system, translation QA, checkpoint system
+- [SoraTranslator](https://github.com/Immortalyzy/SoraTranslator) by Immortalyzy - Token optimization, integration patterns
+- [vnilla](https://github.com/erengy/vnilla) by erengy - Minimal markup format concepts
+
+### Community & Research
+- [Fuwanovel Forums](https://forums.fuwanovel.moe/) - System-NNN/DDSystem research and discussions
+- [Kungal Galgame Community](https://www.kungal.com/) - Chinese VN translation community insights
 - PIL/SLASH/BlackCyc/CYCLET - For creating amazing visual novels
 
 ## License

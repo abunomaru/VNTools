@@ -534,6 +534,373 @@ def is_spt_file(data: bytes) -> bool:
 
 
 # =============================================================================
+# SJIS Tunneling - Character Mapping for Unsupported Characters
+# =============================================================================
+
+class SJISTunnelEncoder:
+    """
+    SJIS Tunneling encoder for mapping unsupported characters to unused SJIS code points.
+
+    Inspired by VNTextPatch's technique to enable non-Japanese characters in SJIS games.
+    Maps unsupported characters (like Western punctuation, accents) to unused SJIS byte sequences.
+    The mapping is stored in sjis_ext.bin for use with VNTextProxy or similar tools.
+
+    This solves the punctuation display issues reported in System-NNN games like Mugen Kairou 2.
+    """
+
+    # SJIS lead byte ranges (excluding user-defined and reserved ranges)
+    # We use 0x81-0x9F and 0xE0-0xEC (being conservative to avoid conflicts)
+    LEAD_BYTES = list(range(0x81, 0xA0)) + list(range(0xE0, 0xED))
+
+    # Trail bytes - avoid control characters and common delimiters
+    # Skip: \t (0x09), \n (0x0A), \r (0x0D), space (0x20), comma (0x2C)
+    TRAIL_BYTES = [b for b in range(0x40, 0xFF)
+                   if b not in [0x09, 0x0A, 0x0D, 0x20, 0x2C, 0x7F]]
+
+    MAX_MAPPINGS = len(LEAD_BYTES) * len(TRAIL_BYTES)  # ~4000+ slots
+
+    def __init__(self):
+        self.char_to_tunnel: Dict[str, bytes] = {}
+        self.tunnel_to_char: Dict[bytes, str] = {}
+        self.next_slot = 0
+
+    def encode(self, text: str, encoding: str = 'shift_jis') -> bytes:
+        """
+        Encode text to SJIS with tunneling for unsupported characters.
+
+        Args:
+            text: String to encode
+            encoding: Base encoding (default: shift_jis)
+
+        Returns:
+            Encoded bytes with tunneled characters
+        """
+        result = bytearray()
+
+        for char in text:
+            # Try normal SJIS encoding first
+            try:
+                char_bytes = char.encode(encoding, errors='strict')
+                # Check if it's in safe SJIS range
+                if len(char_bytes) == 1 or (len(char_bytes) == 2 and char_bytes[0] < 0xF0):
+                    result.extend(char_bytes)
+                    continue
+            except UnicodeEncodeError:
+                pass
+
+            # Character not supported - use tunnel
+            if char not in self.char_to_tunnel:
+                self._allocate_tunnel(char)
+
+            result.extend(self.char_to_tunnel[char])
+
+        return bytes(result)
+
+    def decode(self, data: bytes, encoding: str = 'shift_jis') -> str:
+        """
+        Decode SJIS bytes with tunnel character restoration.
+
+        Args:
+            data: Bytes to decode
+            encoding: Base encoding (default: shift_jis)
+
+        Returns:
+            Decoded string with tunnel characters restored
+        """
+        result = []
+        i = 0
+
+        while i < len(data):
+            # Check for 2-byte sequence
+            if i + 1 < len(data):
+                two_bytes = data[i:i+2]
+                if two_bytes in self.tunnel_to_char:
+                    result.append(self.tunnel_to_char[two_bytes])
+                    i += 2
+                    continue
+
+            # Try normal SJIS decoding
+            try:
+                # Check if it's a lead byte
+                if data[i] in self.LEAD_BYTES and i + 1 < len(data):
+                    char = data[i:i+2].decode(encoding, errors='strict')
+                    result.append(char)
+                    i += 2
+                else:
+                    char = bytes([data[i]]).decode(encoding, errors='strict')
+                    result.append(char)
+                    i += 1
+            except (UnicodeDecodeError, IndexError):
+                # Skip invalid byte
+                i += 1
+
+        return ''.join(result)
+
+    def _allocate_tunnel(self, char: str):
+        """Allocate a tunnel byte sequence for an unsupported character."""
+        if self.next_slot >= self.MAX_MAPPINGS:
+            raise Exception(f"SJIS tunnel limit exceeded ({self.MAX_MAPPINGS} chars)")
+
+        # Calculate lead and trail bytes
+        lead_idx = self.next_slot // len(self.TRAIL_BYTES)
+        trail_idx = self.next_slot % len(self.TRAIL_BYTES)
+
+        lead_byte = self.LEAD_BYTES[lead_idx]
+        trail_byte = self.TRAIL_BYTES[trail_idx]
+
+        tunnel_bytes = bytes([lead_byte, trail_byte])
+
+        self.char_to_tunnel[char] = tunnel_bytes
+        self.tunnel_to_char[tunnel_bytes] = char
+        self.next_slot += 1
+
+    def save_mapping(self, filepath: str):
+        """
+        Save character mapping to sjis_ext.bin file.
+
+        Format: For each mapping, store 4 bytes:
+        - 2 bytes: tunnel sequence (lead + trail)
+        - 2 bytes: original character UTF-16LE
+        """
+        with open(filepath, 'wb') as f:
+            # Write header: version (1 byte) + count (2 bytes)
+            f.write(bytes([0x01]))  # Version 1
+            f.write(struct.pack('<H', len(self.char_to_tunnel)))
+
+            # Write mappings
+            for char, tunnel_bytes in sorted(self.char_to_tunnel.items()):
+                f.write(tunnel_bytes)  # 2 bytes
+                f.write(char.encode('utf-16le'))  # 2 bytes (assuming BMP)
+
+    def load_mapping(self, filepath: str):
+        """Load character mapping from sjis_ext.bin file."""
+        if not os.path.exists(filepath):
+            return
+
+        with open(filepath, 'rb') as f:
+            # Read header
+            version = f.read(1)[0]
+            if version != 0x01:
+                print(f"Warning: Unknown sjis_ext.bin version: {version}")
+                return
+
+            count = struct.unpack('<H', f.read(2))[0]
+
+            # Read mappings
+            for _ in range(count):
+                tunnel_bytes = f.read(2)
+                char_bytes = f.read(2)
+                char = char_bytes.decode('utf-16le')
+
+                self.char_to_tunnel[char] = tunnel_bytes
+                self.tunnel_to_char[tunnel_bytes] = char
+
+            self.next_slot = len(self.char_to_tunnel)
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get tunneling statistics."""
+        return {
+            'mapped_chars': len(self.char_to_tunnel),
+            'available_slots': self.MAX_MAPPINGS - self.next_slot,
+            'usage_percent': (self.next_slot / self.MAX_MAPPINGS) * 100
+        }
+
+
+# =============================================================================
+# Character Name Management
+# =============================================================================
+
+class CharacterNameManager:
+    """
+    Manage character name translations for consistency across scripts.
+
+    Inspired by VNTextPatch's names.xml system.
+    Stores original -> translated name mappings for reuse.
+    """
+
+    def __init__(self, filepath: str = 'names.json'):
+        self.filepath = filepath
+        self.names: Dict[str, str] = {}
+        self.load()
+
+    def add_name(self, original: str, translated: str):
+        """Add or update a character name mapping."""
+        if original and translated:
+            self.names[original] = translated
+
+    def get_translation(self, original: str) -> Optional[str]:
+        """Get translated name for an original name."""
+        return self.names.get(original)
+
+    def load(self):
+        """Load names from JSON file."""
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r', encoding='utf-8') as f:
+                    self.names = json.load(f)
+            except Exception as e:
+                print(f"Warning: Could not load {self.filepath}: {e}")
+
+    def save(self):
+        """Save names to JSON file."""
+        try:
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                json.dump(self.names, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving {self.filepath}: {e}")
+
+    def extract_names_from_json(self, json_data: List[Dict[str, str]]):
+        """
+        Extract character names from VNTranslationTools JSON format.
+
+        Looks for entries with non-empty 'name' fields.
+        """
+        for entry in json_data:
+            name = entry.get('name', '').strip()
+            if name and name not in self.names:
+                # Add with empty translation for manual filling
+                self.names[name] = ''
+
+    def auto_translate_names(self, json_data: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """
+        Auto-fill translated names in JSON data using stored mappings.
+
+        Args:
+            json_data: List of {"name": "...", "message": "..."} entries
+
+        Returns:
+            Modified json_data with translated names filled in
+        """
+        for entry in json_data:
+            original_name = entry.get('name', '')
+            if original_name in self.names and self.names[original_name]:
+                entry['translated_name'] = self.names[original_name]
+
+        return json_data
+
+
+# =============================================================================
+# Word Wrapping for Text Display
+# =============================================================================
+
+class WordWrapper:
+    """
+    Word wrapper for preventing text overflow in VN text boxes.
+
+    Inspired by VNTextPatch's word wrapping system.
+    Supports both monospace and proportional fonts.
+    """
+
+    def __init__(self, chars_per_line: int = 40, mode: str = 'monospace'):
+        """
+        Initialize word wrapper.
+
+        Args:
+            chars_per_line: Maximum characters per line
+            mode: 'monospace' or 'proportional'
+        """
+        self.chars_per_line = chars_per_line
+        self.mode = mode
+
+        # Character width table for proportional fonts (rough estimates)
+        # Based on typical VN font metrics
+        self.char_widths = {
+            # ASCII narrow characters
+            'i': 0.5, 'l': 0.5, 'I': 0.5, 't': 0.6, 'f': 0.6,
+            # ASCII wide characters
+            'W': 1.4, 'M': 1.4, 'm': 1.2, 'w': 1.2,
+            # Punctuation
+            '.': 0.4, ',': 0.4, ':': 0.4, ';': 0.4, '!': 0.5, '?': 0.8,
+            # Spaces and quotes
+            ' ': 0.5, '"': 0.6, "'": 0.4,
+        }
+
+    def wrap(self, text: str) -> str:
+        """
+        Wrap text to fit within character limit.
+
+        Args:
+            text: Text to wrap
+
+        Returns:
+            Text with line breaks inserted
+        """
+        if self.mode == 'monospace':
+            return self._wrap_monospace(text)
+        else:
+            return self._wrap_proportional(text)
+
+    def _wrap_monospace(self, text: str) -> str:
+        """Wrap text assuming monospace font (1 char = 1 unit width)."""
+        lines = []
+        current_line = []
+        current_length = 0
+
+        words = text.split()
+
+        for word in words:
+            word_length = len(word)
+
+            # Check if adding this word would exceed limit
+            if current_length + len(current_line) + word_length > self.chars_per_line:
+                # Start new line
+                if current_line:
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                    current_length = word_length
+                else:
+                    # Single word too long - break it
+                    lines.append(word[:self.chars_per_line])
+                    current_line = [word[self.chars_per_line:]]
+                    current_length = len(current_line[0])
+            else:
+                current_line.append(word)
+                current_length += word_length
+
+        # Add remaining line
+        if current_line:
+            lines.append(' '.join(current_line))
+
+        return '\n'.join(lines)
+
+    def _wrap_proportional(self, text: str) -> str:
+        """Wrap text for proportional fonts using width estimates."""
+        lines = []
+        current_line = []
+        current_width = 0.0
+
+        words = text.split()
+
+        for word in words:
+            word_width = sum(self.char_widths.get(c, 1.0) for c in word)
+            space_width = 0.5 if current_line else 0
+
+            if current_width + space_width + word_width > self.chars_per_line:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                    current_width = word_width
+                else:
+                    # Word too long - add anyway
+                    lines.append(word)
+                    current_line = []
+                    current_width = 0
+            else:
+                current_line.append(word)
+                current_width += space_width + word_width
+
+        if current_line:
+            lines.append(' '.join(current_line))
+
+        return '\n'.join(lines)
+
+    def calculate_line_count(self, text: str) -> int:
+        """Calculate how many lines the text will occupy."""
+        wrapped = self.wrap(text)
+        return wrapped.count('\n') + 1
+
+
+# =============================================================================
 # SPT Script Parser
 # =============================================================================
 
@@ -1943,6 +2310,361 @@ def convert_to_vnt_format(input_path: str, output_path: str) -> bool:
 
     print(f"Converted {len(vnt_data)} strings to VNT format")
     return True
+
+
+# =============================================================================
+# GPT Dictionary System (Terminology & Character Context)
+# =============================================================================
+
+class GPTDictionary:
+    """
+    GPT dictionary system for consistent translation of character names and terminology.
+
+    Inspired by GalTransl's triple dictionary system:
+    - Pre-translation: Japanese terms/names to guide recognition
+    - Post-translation: Target language terms to guide output
+    - Conditional: Context-specific translations
+    """
+
+    def __init__(self, filepath: str = 'gpt_dictionary.json'):
+        self.filepath = filepath
+        self.pre_translation: Dict[str, str] = {}  # JP -> Description/Context
+        self.post_translation: Dict[str, str] = {}  # JP -> Target language
+        self.conditional: Dict[str, Dict[str, str]] = {}  # Context -> {JP -> Target}
+        self.character_contexts: Dict[str, str] = {}  # Character -> Background/personality
+        self.load()
+
+    def load(self):
+        """Load dictionary from JSON file."""
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.pre_translation = data.get('pre_translation', {})
+                    self.post_translation = data.get('post_translation', {})
+                    self.conditional = data.get('conditional', {})
+                    self.character_contexts = data.get('character_contexts', {})
+            except Exception as e:
+                print(f"Warning: Could not load {self.filepath}: {e}")
+
+    def save(self):
+        """Save dictionary to JSON file."""
+        try:
+            data = {
+                'pre_translation': self.pre_translation,
+                'post_translation': self.post_translation,
+                'conditional': self.conditional,
+                'character_contexts': self.character_contexts
+            }
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving {self.filepath}: {e}")
+
+    def add_pre_translation(self, japanese: str, description: str):
+        """Add pre-translation entry (recognition hint)."""
+        self.pre_translation[japanese] = description
+
+    def add_post_translation(self, japanese: str, translation: str):
+        """Add post-translation entry (required translation)."""
+        self.post_translation[japanese] = translation
+
+    def add_conditional(self, context: str, japanese: str, translation: str):
+        """Add context-specific translation."""
+        if context not in self.conditional:
+            self.conditional[context] = {}
+        self.conditional[context][japanese] = translation
+
+    def add_character_context(self, name: str, context: str):
+        """Add character background/personality context."""
+        self.character_contexts[name] = context
+
+    def get_context_prompt(self, context: str = '') -> str:
+        """
+        Generate prompt segment with dictionary information.
+
+        Args:
+            context: Optional context identifier for conditional translations
+
+        Returns:
+            Formatted string for inclusion in LLM prompt
+        """
+        prompt_parts = []
+
+        # Character contexts
+        if self.character_contexts:
+            prompt_parts.append("## Character Information:")
+            for char, desc in self.character_contexts.items():
+                prompt_parts.append(f"- {char}: {desc}")
+            prompt_parts.append("")
+
+        # Pre-translation (recognition hints)
+        if self.pre_translation:
+            prompt_parts.append("## Terms to Recognize:")
+            for jp, desc in self.pre_translation.items():
+                prompt_parts.append(f"- {jp}: {desc}")
+            prompt_parts.append("")
+
+        # Post-translation (required translations)
+        if self.post_translation:
+            prompt_parts.append("## Required Translations:")
+            for jp, trans in self.post_translation.items():
+                prompt_parts.append(f"- {jp} → {trans}")
+            prompt_parts.append("")
+
+        # Conditional translations for current context
+        if context and context in self.conditional:
+            prompt_parts.append(f"## Context-Specific Translations ({context}):")
+            for jp, trans in self.conditional[context].items():
+                prompt_parts.append(f"- {jp} → {trans}")
+            prompt_parts.append("")
+
+        return '\n'.join(prompt_parts)
+
+    def apply_post_processing(self, text: str) -> str:
+        """
+        Apply post-translation dictionary replacements.
+
+        Args:
+            text: Translated text
+
+        Returns:
+            Text with dictionary terms enforced
+        """
+        result = text
+        for jp, trans in self.post_translation.items():
+            # Only replace if Japanese term somehow leaked through
+            result = result.replace(jp, trans)
+        return result
+
+
+# =============================================================================
+# Translation QA & Validation
+# =============================================================================
+
+class TranslationQA:
+    """
+    Automated quality assurance for translations.
+
+    Inspired by GalTransl's QA system. Detects common translation errors:
+    - Repeated words
+    - Punctuation mismatches
+    - Leftover Japanese characters
+    - Line break discrepancies
+    - Length violations
+    - Dictionary compliance failures
+    """
+
+    # Japanese character ranges
+    HIRAGANA = range(0x3040, 0x309F + 1)
+    KATAKANA = range(0x30A0, 0x30FF + 1)
+    KANJI_1 = range(0x4E00, 0x9FFF + 1)
+    KANJI_2 = range(0x3400, 0x4DBF + 1)
+
+    def __init__(self, dictionary: Optional[GPTDictionary] = None):
+        self.dictionary = dictionary
+        self.issues: List[Dict[str, Any]] = []
+
+    def validate(self, original: str, translated: str, index: int = 0) -> List[str]:
+        """
+        Validate a translated string and return list of issues.
+
+        Args:
+            original: Original text
+            translated: Translated text
+            index: String index for reporting
+
+        Returns:
+            List of issue descriptions
+        """
+        issues = []
+
+        # Check for repeated words (more than 2 consecutive)
+        words = translated.split()
+        for i in range(len(words) - 2):
+            if words[i] == words[i+1] == words[i+2] and len(words[i]) > 2:
+                issues.append(f"Repeated word: '{words[i]}'")
+
+        # Check for leftover Japanese characters
+        if self._contains_japanese(translated):
+            issues.append("Contains untranslated Japanese characters")
+
+        # Check punctuation balance
+        punct_pairs = [('(', ')'), ('[', ']'), ('{', '}'), ('「', '」'), ('『', '』')]
+        for open_p, close_p in punct_pairs:
+            orig_open = original.count(open_p)
+            orig_close = original.count(close_p)
+            trans_open = translated.count(open_p)
+            trans_close = translated.count(close_p)
+
+            if orig_open != orig_close and trans_open != trans_close:
+                issues.append(f"Unbalanced punctuation: {open_p}{close_p}")
+
+        # Check line break count difference
+        orig_lines = original.count('\n')
+        trans_lines = translated.count('\n')
+        if abs(orig_lines - trans_lines) > 1:
+            issues.append(f"Line break mismatch: {orig_lines} → {trans_lines}")
+
+        # Check length (warn if translation is much longer/shorter)
+        orig_len = len(original)
+        trans_len = len(translated)
+        if trans_len > orig_len * 2.5:
+            issues.append(f"Translation too long: {trans_len} chars (original: {orig_len})")
+        elif trans_len < orig_len * 0.3 and trans_len > 0:
+            issues.append(f"Translation too short: {trans_len} chars (original: {orig_len})")
+
+        # Check empty translation
+        if not translated.strip() and original.strip():
+            issues.append("Empty translation for non-empty original")
+
+        # Dictionary compliance check
+        if self.dictionary:
+            for jp, required_trans in self.dictionary.post_translation.items():
+                if jp in original and required_trans not in translated:
+                    issues.append(f"Missing required translation: {jp} → {required_trans}")
+
+        # Store issues for reporting
+        if issues:
+            self.issues.append({
+                'index': index,
+                'original': original[:50] + '...' if len(original) > 50 else original,
+                'translated': translated[:50] + '...' if len(translated) > 50 else translated,
+                'issues': issues
+            })
+
+        return issues
+
+    def _contains_japanese(self, text: str) -> bool:
+        """Check if text contains Japanese characters."""
+        for char in text:
+            code = ord(char)
+            if (code in self.HIRAGANA or code in self.KATAKANA or
+                code in self.KANJI_1 or code in self.KANJI_2):
+                return True
+        return False
+
+    def generate_report(self) -> str:
+        """Generate QA report of all issues found."""
+        if not self.issues:
+            return "✓ No issues found!"
+
+        lines = [f"\n{'='*60}", "Translation QA Report", '='*60, ""]
+        lines.append(f"Total issues found: {len(self.issues)}\n")
+
+        for item in self.issues:
+            lines.append(f"[String {item['index']}]")
+            lines.append(f"Original: {item['original']}")
+            lines.append(f"Translated: {item['translated']}")
+            lines.append("Issues:")
+            for issue in item['issues']:
+                lines.append(f"  - {issue}")
+            lines.append("")
+
+        return '\n'.join(lines)
+
+    def clear(self):
+        """Clear accumulated issues."""
+        self.issues = []
+
+
+# =============================================================================
+# Checkpoint System for Resuming Translations
+# =============================================================================
+
+class CheckpointManager:
+    """
+    Checkpoint system for saving and resuming translation progress.
+
+    Inspired by GalTransl's checkpoint system.
+    Allows resuming interrupted translations without losing progress.
+    """
+
+    def __init__(self, checkpoint_dir: str = '.checkpoints'):
+        self.checkpoint_dir = checkpoint_dir
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+    def save_checkpoint(self, project_name: str, data: Dict[str, Any]):
+        """
+        Save translation checkpoint.
+
+        Args:
+            project_name: Unique identifier for this translation project
+            data: Checkpoint data (progress, cache, etc.)
+        """
+        checkpoint_path = os.path.join(self.checkpoint_dir, f"{project_name}.json")
+
+        checkpoint = {
+            'timestamp': time.time(),
+            'project_name': project_name,
+            'data': data
+        }
+
+        try:
+            with open(checkpoint_path, 'w', encoding='utf-8') as f:
+                json.dump(checkpoint, f, ensure_ascii=False, indent=2)
+            print(f"Checkpoint saved: {checkpoint_path}")
+        except Exception as e:
+            print(f"Error saving checkpoint: {e}")
+
+    def load_checkpoint(self, project_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Load translation checkpoint.
+
+        Args:
+            project_name: Project identifier
+
+        Returns:
+            Checkpoint data or None if not found
+        """
+        checkpoint_path = os.path.join(self.checkpoint_dir, f"{project_name}.json")
+
+        if not os.path.exists(checkpoint_path):
+            return None
+
+        try:
+            with open(checkpoint_path, 'r', encoding='utf-8') as f:
+                checkpoint = json.load(f)
+
+            timestamp = checkpoint.get('timestamp', 0)
+            age_hours = (time.time() - timestamp) / 3600
+
+            print(f"Found checkpoint from {age_hours:.1f} hours ago")
+            return checkpoint.get('data')
+
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            return None
+
+    def delete_checkpoint(self, project_name: str):
+        """Delete checkpoint after successful completion."""
+        checkpoint_path = os.path.join(self.checkpoint_dir, f"{project_name}.json")
+        if os.path.exists(checkpoint_path):
+            try:
+                os.remove(checkpoint_path)
+                print(f"Checkpoint deleted: {checkpoint_path}")
+            except Exception as e:
+                print(f"Error deleting checkpoint: {e}")
+
+    def list_checkpoints(self) -> List[Dict[str, Any]]:
+        """List all available checkpoints."""
+        checkpoints = []
+
+        for filename in os.listdir(self.checkpoint_dir):
+            if filename.endswith('.json'):
+                filepath = os.path.join(self.checkpoint_dir, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        checkpoint = json.load(f)
+                        checkpoints.append({
+                            'project': checkpoint.get('project_name'),
+                            'timestamp': checkpoint.get('timestamp'),
+                            'file': filename
+                        })
+                except:
+                    pass
+
+        return sorted(checkpoints, key=lambda x: x['timestamp'], reverse=True)
 
 
 # =============================================================================
