@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VNTools - Visual Novel Translation Toolkit</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .upload-area {
+            border: 2px dashed #cbd5e1;
+            transition: all 0.3s ease;
+        }
+        .upload-area.dragover {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+        .status-success { color: #10b981; }
+        .status-error { color: #ef4444; }
+        .status-processing { color: #f59e0b; }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #94a3b8;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 to-slate-100 min-h-screen">
+    <!-- Header -->
+    <header class="bg-white shadow-md sticky top-0 z-50">
+        <div class="container mx-auto px-6 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <i class="fas fa-book text-3xl text-blue-600"></i>
+                    <div>
+                        <h1 class="text-2xl font-bold text-gray-800">VNTools</h1>
+                        <p class="text-sm text-gray-500">Visual Novel Translation Toolkit</p>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <a href="https://github.com/abunomaru/VNTools" target="_blank" class="text-gray-600 hover:text-blue-600 transition">
+                        <i class="fab fa-github text-2xl"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="container mx-auto px-6 py-8">
+        <!-- Navigation Tabs -->
+        <div class="bg-white rounded-lg shadow-lg mb-6 overflow-hidden">
+            <div class="flex flex-wrap border-b border-gray-200 overflow-x-auto">
+                <button class="tab-btn px-6 py-4 text-sm font-medium text-gray-700 hover:text-blue-600 hover:bg-blue-50 border-b-2 border-transparent transition active" data-tab="archives">
+                    <i class="fas fa-archive mr-2"></i>Archives
+                </button>
+                <button class="tab-btn px-6 py-4 text-sm font-medium text-gray-700 hover:text-blue-600 hover:bg-blue-50 border-b-2 border-transparent transition" data-tab="scripts">
+                    <i class="fas fa-file-code mr-2"></i>Scripts
+                </button>
+                <button class="tab-btn px-6 py-4 text-sm font-medium text-gray-700 hover:text-blue-600 hover:bg-blue-50 border-b-2 border-transparent transition" data-tab="text">
+                    <i class="fas fa-language mr-2"></i>Text Extraction
+                </button>
+                <button class="tab-btn px-6 py-4 text-sm font-medium text-gray-700 hover:text-blue-600 hover:bg-blue-50 border-b-2 border-transparent transition" data-tab="translate">
+                    <i class="fas fa-robot mr-2"></i>AI Translation
+                </button>
+                <button class="tab-btn px-6 py-4 text-sm font-medium text-gray-700 hover:text-blue-600 hover:bg-blue-50 border-b-2 border-transparent transition" data-tab="advanced">
+                    <i class="fas fa-cogs mr-2"></i>Advanced Tools
+                </button>
+                <button class="tab-btn px-6 py-4 text-sm font-medium text-gray-700 hover:text-blue-600 hover:bg-blue-50 border-b-2 border-transparent transition" data-tab="help">
+                    <i class="fas fa-question-circle mr-2"></i>Help
+                </button>
+            </div>
+        </div>
+
+        <!-- Status Messages -->
+        <div id="statusMessages" class="mb-6"></div>
+
+        <!-- Tab Contents -->
+        <div class="tab-contents">
+            <!-- Archives Tab -->
+            <div id="archives" class="tab-content active">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Extract Archive -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-folder-open text-blue-600 mr-2"></i>
+                            Extract Archive
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Extract DDP2/DDP3 archive files</p>
+
+                        <div class="upload-area rounded-lg p-8 text-center mb-4" id="extractUploadArea">
+                            <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 mb-2"></i>
+                            <p class="text-gray-600 mb-2">Drag and drop DDP file here or</p>
+                            <label class="inline-block bg-blue-600 text-white px-6 py-2 rounded-lg cursor-pointer hover:bg-blue-700 transition">
+                                Browse Files
+                                <input type="file" id="extractArchiveFile" class="hidden" accept=".ddp,.DDP">
+                            </label>
+                        </div>
+
+                        <div id="extractFileName" class="text-sm text-gray-600 mb-4 hidden"></div>
+
+                        <button id="extractArchiveBtn" class="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 transition disabled:bg-gray-400" disabled>
+                            <i class="fas fa-box-open mr-2"></i>Extract Archive
+                        </button>
+
+                        <div id="extractResults" class="mt-4 hidden">
+                            <h3 class="font-semibold text-gray-700 mb-2">Extracted Files:</h3>
+                            <div class="bg-gray-50 rounded-lg p-4 max-h-64 overflow-y-auto">
+                                <ul id="extractFileList" class="text-sm text-gray-600 space-y-1"></ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Repack Archive -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-box text-green-600 mr-2"></i>
+                            Repack Archive
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Create DDP3 archive from folder</p>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Input Directory Path
+                            </label>
+                            <input type="text" id="repackInputDir" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="/path/to/extracted/files">
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Output Archive Name
+                            </label>
+                            <input type="text" id="repackOutputName" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="repacked.ddp" value="repacked.ddp">
+                        </div>
+
+                        <button id="repackArchiveBtn" class="w-full bg-green-600 text-white py-3 rounded-lg font-medium hover:bg-green-700 transition">
+                            <i class="fas fa-compress mr-2"></i>Repack Archive
+                        </button>
+                    </div>
+
+                    <!-- Analyze Archive -->
+                    <div class="bg-white rounded-lg shadow-lg p-6 lg:col-span-2">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-chart-bar text-purple-600 mr-2"></i>
+                            Analyze Archive
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">View detailed information about archive contents</p>
+
+                        <div class="flex gap-4 mb-4">
+                            <div class="flex-1">
+                                <label class="inline-block bg-purple-600 text-white px-6 py-2 rounded-lg cursor-pointer hover:bg-purple-700 transition w-full text-center">
+                                    <i class="fas fa-file-upload mr-2"></i>Select Archive
+                                    <input type="file" id="analyzeArchiveFile" class="hidden" accept=".ddp,.DDP">
+                                </label>
+                            </div>
+                            <button id="analyzeArchiveBtn" class="bg-purple-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-purple-700 transition disabled:bg-gray-400" disabled>
+                                <i class="fas fa-search mr-2"></i>Analyze
+                            </button>
+                        </div>
+
+                        <div id="analyzeResults" class="hidden">
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                                <div class="bg-blue-50 rounded-lg p-4">
+                                    <p class="text-sm text-gray-600">Total Files</p>
+                                    <p id="analyzeFileCount" class="text-2xl font-bold text-blue-600">0</p>
+                                </div>
+                                <div class="bg-green-50 rounded-lg p-4">
+                                    <p class="text-sm text-gray-600">Total Size</p>
+                                    <p id="analyzeTotalSize" class="text-2xl font-bold text-green-600">0 MB</p>
+                                </div>
+                                <div class="bg-purple-50 rounded-lg p-4">
+                                    <p class="text-sm text-gray-600">Avg Compression</p>
+                                    <p id="analyzeCompression" class="text-2xl font-bold text-purple-600">0%</p>
+                                </div>
+                            </div>
+
+                            <div class="bg-gray-50 rounded-lg p-4 max-h-96 overflow-y-auto">
+                                <table class="w-full text-sm">
+                                    <thead class="bg-gray-200 sticky top-0">
+                                        <tr>
+                                            <th class="text-left p-2">File Path</th>
+                                            <th class="text-right p-2">Size</th>
+                                            <th class="text-right p-2">Compressed</th>
+                                            <th class="text-right p-2">Ratio</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="analyzeFileTable"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scripts Tab -->
+            <div id="scripts" class="tab-content">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Decrypt Script -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-unlock text-blue-600 mr-2"></i>
+                            Decrypt Script
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Decrypt HXB, SPT, or NNN script files</p>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Script Type</label>
+                            <select id="decryptScriptType" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                <option value="hxb">HXB (DDSystem/System-NNN)</option>
+                                <option value="spt">SPT (BlackCyc)</option>
+                                <option value="nnn">NNN (Dev Format)</option>
+                            </select>
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="inline-block bg-blue-600 text-white px-6 py-2 rounded-lg cursor-pointer hover:bg-blue-700 transition w-full text-center">
+                                <i class="fas fa-file-upload mr-2"></i>Select Script File
+                                <input type="file" id="decryptScriptFile" class="hidden">
+                            </label>
+                        </div>
+
+                        <button id="decryptScriptBtn" class="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 transition disabled:bg-gray-400" disabled>
+                            <i class="fas fa-unlock mr-2"></i>Decrypt Script
+                        </button>
+
+                        <div id="decryptPreview" class="mt-4 hidden">
+                            <h3 class="font-semibold text-gray-700 mb-2">Preview:</h3>
+                            <div class="bg-gray-50 rounded-lg p-4 max-h-64 overflow-y-auto">
+                                <pre id="decryptPreviewText" class="text-xs text-gray-700 whitespace-pre-wrap"></pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Encrypt Script -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-lock text-green-600 mr-2"></i>
+                            Encrypt Script
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Encrypt text file to HXB or SPT format</p>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Target Format</label>
+                            <select id="encryptScriptType" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent">
+                                <option value="hxb">HXB (DDSystem/System-NNN)</option>
+                                <option value="spt">SPT (BlackCyc)</option>
+                            </select>
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="inline-block bg-green-600 text-white px-6 py-2 rounded-lg cursor-pointer hover:bg-green-700 transition w-full text-center">
+                                <i class="fas fa-file-upload mr-2"></i>Select Text File
+                                <input type="file" id="encryptScriptFile" class="hidden">
+                            </label>
+                        </div>
+
+                        <button id="encryptScriptBtn" class="w-full bg-green-600 text-white py-3 rounded-lg font-medium hover:bg-green-700 transition disabled:bg-gray-400" disabled>
+                            <i class="fas fa-lock mr-2"></i>Encrypt Script
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Text Extraction Tab -->
+            <div id="text" class="tab-content">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Extract Text -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-file-export text-blue-600 mr-2"></i>
+                            Extract Text
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Extract translatable strings from scripts to JSON</p>
+
+                        <div class="mb-4">
+                            <label class="inline-block bg-blue-600 text-white px-6 py-2 rounded-lg cursor-pointer hover:bg-blue-700 transition w-full text-center">
+                                <i class="fas fa-file-upload mr-2"></i>Select Script File
+                                <input type="file" id="extractTextFile" class="hidden">
+                            </label>
+                        </div>
+
+                        <button id="extractTextBtn" class="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 transition disabled:bg-gray-400" disabled>
+                            <i class="fas fa-file-export mr-2"></i>Extract Text
+                        </button>
+
+                        <div id="extractTextResults" class="mt-4 hidden">
+                            <div class="bg-blue-50 rounded-lg p-4 mb-4">
+                                <p class="text-sm text-gray-600">Extracted Strings</p>
+                                <p id="extractTextCount" class="text-2xl font-bold text-blue-600">0</p>
+                            </div>
+                            <h3 class="font-semibold text-gray-700 mb-2">Preview:</h3>
+                            <div class="bg-gray-50 rounded-lg p-4 max-h-64 overflow-y-auto">
+                                <pre id="extractTextPreview" class="text-xs text-gray-700 whitespace-pre-wrap"></pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Insert Text -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-file-import text-green-600 mr-2"></i>
+                            Insert Text
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Insert translated text back into script</p>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Script File Path</label>
+                            <input type="text" id="insertScriptPath" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent" placeholder="/path/to/script.hxb">
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">JSON File Path</label>
+                            <input type="text" id="insertJsonPath" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent" placeholder="/path/to/translated.json">
+                        </div>
+
+                        <button id="insertTextBtn" class="w-full bg-green-600 text-white py-3 rounded-lg font-medium hover:bg-green-700 transition">
+                            <i class="fas fa-file-import mr-2"></i>Insert Text
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Translation Tab -->
+            <div id="translate" class="tab-content">
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h2 class="text-xl font-bold text-gray-800 mb-6 flex items-center">
+                        <i class="fas fa-robot text-purple-600 mr-2"></i>
+                        AI Translation
+                    </h2>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- File Selection -->
+                        <div>
+                            <h3 class="font-semibold text-gray-700 mb-4">1. Input File</h3>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">JSON File Path</label>
+                                <input type="text" id="translateInputFile" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" placeholder="/path/to/extracted.json">
+                            </div>
+                        </div>
+
+                        <!-- API Settings -->
+                        <div>
+                            <h3 class="font-semibold text-gray-700 mb-4">2. API Settings</h3>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Provider</label>
+                                <select id="translateProvider" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                    <option value="openai">OpenAI (GPT-4, GPT-3.5)</option>
+                                    <option value="anthropic">Anthropic (Claude)</option>
+                                    <option value="deepl">DeepL</option>
+                                </select>
+                            </div>
+
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">API Key</label>
+                                <input type="password" id="translateApiKey" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" placeholder="sk-...">
+                            </div>
+
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Model</label>
+                                <input type="text" id="translateModel" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" value="gpt-4" placeholder="gpt-4">
+                            </div>
+                        </div>
+
+                        <!-- Language Settings -->
+                        <div>
+                            <h3 class="font-semibold text-gray-700 mb-4">3. Language Settings</h3>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Source Language</label>
+                                <input type="text" id="translateSourceLang" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" value="Japanese">
+                            </div>
+
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Target Language</label>
+                                <input type="text" id="translateTargetLang" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" value="English">
+                            </div>
+                        </div>
+
+                        <!-- Advanced Options -->
+                        <div>
+                            <h3 class="font-semibold text-gray-700 mb-4">4. Advanced Options</h3>
+
+                            <div class="mb-4">
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="translateUseSJIS" class="mr-2 w-5 h-5 text-purple-600 rounded focus:ring-purple-500">
+                                    <span class="text-sm font-medium text-gray-700">Use SJIS Tunneling</span>
+                                </label>
+                                <p class="text-xs text-gray-500 ml-7">Map unsupported characters to Shift-JIS</p>
+                            </div>
+
+                            <div class="mb-4">
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="translateUseDictionary" class="mr-2 w-5 h-5 text-purple-600 rounded focus:ring-purple-500">
+                                    <span class="text-sm font-medium text-gray-700">Use GPT Dictionary</span>
+                                </label>
+                                <p class="text-xs text-gray-500 ml-7">Enforce consistent terminology</p>
+                            </div>
+
+                            <div class="mb-4" id="dictionaryFileSection" style="display: none;">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Dictionary File Path</label>
+                                <input type="text" id="translateDictionaryFile" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent" placeholder="/path/to/dictionary.json">
+                            </div>
+
+                            <div class="mb-4">
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="translateUseQA" class="mr-2 w-5 h-5 text-purple-600 rounded focus:ring-purple-500" checked>
+                                    <span class="text-sm font-medium text-gray-700">Use Translation QA</span>
+                                </label>
+                                <p class="text-xs text-gray-500 ml-7">Automated quality validation</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button id="translateBtn" class="w-full bg-purple-600 text-white py-3 rounded-lg font-medium hover:bg-purple-700 transition mt-6">
+                        <i class="fas fa-language mr-2"></i>Start Translation
+                    </button>
+
+                    <div id="translateProgress" class="mt-6 hidden">
+                        <div class="bg-gray-200 rounded-full h-4 overflow-hidden">
+                            <div id="translateProgressBar" class="bg-purple-600 h-4 transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                        <p id="translateProgressText" class="text-center text-sm text-gray-600 mt-2">Processing...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Advanced Tools Tab -->
+            <div id="advanced" class="tab-content">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- SJIS Tunneling -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-exchange-alt text-blue-600 mr-2"></i>
+                            SJIS Tunneling
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Map unsupported characters to Shift-JIS code points</p>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Input Text</label>
+                            <textarea id="sjisInputText" rows="4" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder='Enter text with special characters (é, à, ñ, etc.)'></textarea>
+                        </div>
+
+                        <div class="flex gap-2 mb-4">
+                            <button id="sjisEncodeBtn" class="flex-1 bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700 transition">
+                                <i class="fas fa-arrow-down mr-2"></i>Encode
+                            </button>
+                            <button id="sjisDecodeBtn" class="flex-1 bg-green-600 text-white py-2 rounded-lg font-medium hover:bg-green-700 transition">
+                                <i class="fas fa-arrow-up mr-2"></i>Decode
+                            </button>
+                        </div>
+
+                        <div id="sjisOutput" class="hidden">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Output</label>
+                            <textarea id="sjisOutputText" rows="4" class="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50" readonly></textarea>
+
+                            <div id="sjisMapping" class="mt-4 hidden">
+                                <h3 class="font-semibold text-gray-700 mb-2">Character Mapping:</h3>
+                                <div class="bg-gray-50 rounded-lg p-4 max-h-48 overflow-y-auto">
+                                    <pre id="sjisMappingText" class="text-xs text-gray-700"></pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Word Wrapping -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-align-left text-green-600 mr-2"></i>
+                            Word Wrapping
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Apply automatic line breaking for display</p>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Input Text</label>
+                            <textarea id="wrapInputText" rows="4" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent" placeholder="Enter long text to wrap"></textarea>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Max Width</label>
+                                <input type="number" id="wrapMaxWidth" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent" value="40" min="10" max="200">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Font Type</label>
+                                <select id="wrapFontType" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent">
+                                    <option value="monospace">Monospace</option>
+                                    <option value="proportional">Proportional</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <button id="wrapTextBtn" class="w-full bg-green-600 text-white py-2 rounded-lg font-medium hover:bg-green-700 transition mb-4">
+                            <i class="fas fa-text-width mr-2"></i>Apply Wrapping
+                        </button>
+
+                        <div id="wrapOutput" class="hidden">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Wrapped Text</label>
+                            <textarea id="wrapOutputText" rows="6" class="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50 font-mono text-sm" readonly></textarea>
+                        </div>
+                    </div>
+
+                    <!-- Format Conversion -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-sync-alt text-purple-600 mr-2"></i>
+                            Format Conversion
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Convert between JSON formats (VNT compatible)</p>
+
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Target Format</label>
+                            <select id="convertFormat" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                <option value="vnt">VNTranslationTools Format</option>
+                            </select>
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="inline-block bg-purple-600 text-white px-6 py-2 rounded-lg cursor-pointer hover:bg-purple-700 transition w-full text-center">
+                                <i class="fas fa-file-upload mr-2"></i>Select JSON File
+                                <input type="file" id="convertFile" class="hidden" accept=".json">
+                            </label>
+                        </div>
+
+                        <button id="convertBtn" class="w-full bg-purple-600 text-white py-2 rounded-lg font-medium hover:bg-purple-700 transition disabled:bg-gray-400" disabled>
+                            <i class="fas fa-sync-alt mr-2"></i>Convert Format
+                        </button>
+                    </div>
+
+                    <!-- Character Name Manager -->
+                    <div class="bg-white rounded-lg shadow-lg p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                            <i class="fas fa-user-friends text-orange-600 mr-2"></i>
+                            Character Name Manager
+                        </h2>
+                        <p class="text-sm text-gray-600 mb-4">Manage character name database for consistent translation</p>
+
+                        <div class="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                            <p class="text-sm text-orange-800">
+                                <i class="fas fa-info-circle mr-2"></i>
+                                This feature allows you to maintain a reusable character name database. Use the CLI tool to manage character names:
+                            </p>
+                            <code class="block mt-2 bg-white p-2 rounded text-xs">
+                                python systemnnn_tools.py character-names add "キャラ名" "Character Name"
+                            </code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Help Tab -->
+            <div id="help" class="tab-content">
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-6 flex items-center">
+                        <i class="fas fa-book-open text-blue-600 mr-3"></i>
+                        VNTools Documentation
+                    </h2>
+
+                    <div class="space-y-6">
+                        <!-- Quick Start -->
+                        <div>
+                            <h3 class="text-xl font-semibold text-gray-800 mb-3 flex items-center">
+                                <i class="fas fa-rocket text-green-600 mr-2"></i>
+                                Quick Start Guide
+                            </h3>
+                            <div class="bg-gray-50 rounded-lg p-4">
+                                <ol class="list-decimal list-inside space-y-2 text-gray-700">
+                                    <li><strong>Extract Archive:</strong> Upload a .ddp file to extract game files</li>
+                                    <li><strong>Decrypt Scripts:</strong> Decrypt .hxb or .spt script files</li>
+                                    <li><strong>Extract Text:</strong> Extract translatable text to JSON</li>
+                                    <li><strong>Translate:</strong> Use AI translation with your API key</li>
+                                    <li><strong>Insert Text:</strong> Insert translations back into scripts</li>
+                                    <li><strong>Encrypt:</strong> Encrypt scripts back to game format</li>
+                                    <li><strong>Repack:</strong> Repack files into .ddp archive</li>
+                                </ol>
+                            </div>
+                        </div>
+
+                        <!-- Supported Engines -->
+                        <div>
+                            <h3 class="text-xl font-semibold text-gray-800 mb-3 flex items-center">
+                                <i class="fas fa-gamepad text-purple-600 mr-2"></i>
+                                Supported Engines
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                    <h4 class="font-semibold text-blue-800 mb-2">System-NNN</h4>
+                                    <p class="text-sm text-gray-700">PIL/SLASH engine<br>Format: HXB scripts</p>
+                                </div>
+                                <div class="bg-green-50 border border-green-200 rounded-lg p-4">
+                                    <h4 class="font-semibold text-green-800 mb-2">DDSystem</h4>
+                                    <p class="text-sm text-gray-700">CYCLET engine<br>Format: HXB scripts</p>
+                                </div>
+                                <div class="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                                    <h4 class="font-semibold text-purple-800 mb-2">BlackCyc</h4>
+                                    <p class="text-sm text-gray-700">BLACK CYC engine<br>Format: SPT scripts</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Features -->
+                        <div>
+                            <h3 class="text-xl font-semibold text-gray-800 mb-3 flex items-center">
+                                <i class="fas fa-star text-yellow-600 mr-2"></i>
+                                Advanced Features
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div class="border border-gray-200 rounded-lg p-4">
+                                    <h4 class="font-semibold text-gray-800 mb-2">
+                                        <i class="fas fa-exchange-alt text-blue-600 mr-2"></i>SJIS Tunneling
+                                    </h4>
+                                    <p class="text-sm text-gray-600">Map Western characters to unused Shift-JIS code points for in-game display</p>
+                                </div>
+                                <div class="border border-gray-200 rounded-lg p-4">
+                                    <h4 class="font-semibold text-gray-800 mb-2">
+                                        <i class="fas fa-book text-green-600 mr-2"></i>GPT Dictionary
+                                    </h4>
+                                    <p class="text-sm text-gray-600">Maintain consistent terminology with pre/post-translation enforcement</p>
+                                </div>
+                                <div class="border border-gray-200 rounded-lg p-4">
+                                    <h4 class="font-semibold text-gray-800 mb-2">
+                                        <i class="fas fa-check-circle text-purple-600 mr-2"></i>Translation QA
+                                    </h4>
+                                    <p class="text-sm text-gray-600">Automated quality checks for repeated words, untranslated text, and more</p>
+                                </div>
+                                <div class="border border-gray-200 rounded-lg p-4">
+                                    <h4 class="font-semibold text-gray-800 mb-2">
+                                        <i class="fas fa-align-left text-orange-600 mr-2"></i>Word Wrapping
+                                    </h4>
+                                    <p class="text-sm text-gray-600">Automatic line breaking for monospace/proportional fonts</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- API Providers -->
+                        <div>
+                            <h3 class="text-xl font-semibold text-gray-800 mb-3 flex items-center">
+                                <i class="fas fa-cloud text-indigo-600 mr-2"></i>
+                                Supported Translation APIs
+                            </h3>
+                            <div class="bg-gray-50 rounded-lg p-4">
+                                <ul class="space-y-2 text-gray-700">
+                                    <li class="flex items-center">
+                                        <i class="fas fa-check text-green-600 mr-2"></i>
+                                        <strong class="mr-2">OpenAI:</strong> GPT-4, GPT-4o, GPT-3.5-turbo
+                                    </li>
+                                    <li class="flex items-center">
+                                        <i class="fas fa-check text-green-600 mr-2"></i>
+                                        <strong class="mr-2">Anthropic:</strong> Claude 3 (Opus, Sonnet, Haiku)
+                                    </li>
+                                    <li class="flex items-center">
+                                        <i class="fas fa-check text-green-600 mr-2"></i>
+                                        <strong class="mr-2">DeepL:</strong> Free and Pro tiers
+                                    </li>
+                                    <li class="flex items-center">
+                                        <i class="fas fa-check text-green-600 mr-2"></i>
+                                        <strong class="mr-2">OpenAI-Compatible:</strong> Ollama, LM Studio, local models
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        <!-- Tips -->
+                        <div>
+                            <h3 class="text-xl font-semibold text-gray-800 mb-3 flex items-center">
+                                <i class="fas fa-lightbulb text-yellow-600 mr-2"></i>
+                                Pro Tips
+                            </h3>
+                            <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                                <ul class="space-y-2 text-gray-700 text-sm">
+                                    <li class="flex items-start">
+                                        <i class="fas fa-arrow-right text-yellow-600 mr-2 mt-1"></i>
+                                        <span>Always backup original game files before patching</span>
+                                    </li>
+                                    <li class="flex items-start">
+                                        <i class="fas fa-arrow-right text-yellow-600 mr-2 mt-1"></i>
+                                        <span>Use GPT-4 for best translation quality, GPT-3.5 for speed</span>
+                                    </li>
+                                    <li class="flex items-start">
+                                        <i class="fas fa-arrow-right text-yellow-600 mr-2 mt-1"></i>
+                                        <span>Enable Translation QA to catch common issues automatically</span>
+                                    </li>
+                                    <li class="flex items-start">
+                                        <i class="fas fa-arrow-right text-yellow-600 mr-2 mt-1"></i>
+                                        <span>Use SJIS Tunneling if the game doesn't support Western characters</span>
+                                    </li>
+                                    <li class="flex items-start">
+                                        <i class="fas fa-arrow-right text-yellow-600 mr-2 mt-1"></i>
+                                        <span>Create a GPT Dictionary for character names and terminology consistency</span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        <!-- GitHub Link -->
+                        <div class="bg-gradient-to-r from-blue-50 to-purple-50 border border-blue-200 rounded-lg p-6 text-center">
+                            <i class="fab fa-github text-4xl text-gray-800 mb-3"></i>
+                            <h3 class="text-lg font-semibold text-gray-800 mb-2">Open Source on GitHub</h3>
+                            <p class="text-sm text-gray-600 mb-4">Full documentation and CLI tools available</p>
+                            <a href="https://github.com/abunomaru/VNTools" target="_blank" class="inline-block bg-gray-800 text-white px-6 py-2 rounded-lg hover:bg-gray-700 transition">
+                                <i class="fab fa-github mr-2"></i>View on GitHub
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-white border-t border-gray-200 mt-12 py-6">
+        <div class="container mx-auto px-6 text-center text-gray-600 text-sm">
+            <p>&copy; 2025 VNTools - Visual Novel Translation Toolkit</p>
+            <p class="mt-2">Made for translators, by translators</p>
+        </div>
+    </footer>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.6.0/axios.min.js"></script>
+    <script>
+        // Tab switching
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+
+                // Update buttons
+                document.querySelectorAll('.tab-btn').forEach(b => {
+                    b.classList.remove('active', 'border-blue-600', 'text-blue-600');
+                });
+                btn.classList.add('active', 'border-blue-600', 'text-blue-600');
+
+                // Update content
+                document.querySelectorAll('.tab-content').forEach(content => {
+                    content.classList.remove('active');
+                });
+                document.getElementById(tabName).classList.add('active');
+            });
+        });
+
+        // Status message helper
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('statusMessages');
+            const colors = {
+                success: 'bg-green-50 border-green-200 text-green-800',
+                error: 'bg-red-50 border-red-200 text-red-800',
+                info: 'bg-blue-50 border-blue-200 text-blue-800',
+                warning: 'bg-yellow-50 border-yellow-200 text-yellow-800'
+            };
+
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `border rounded-lg p-4 mb-4 ${colors[type]} animate-fade-in`;
+            alertDiv.innerHTML = `
+                <div class="flex items-center justify-between">
+                    <span><i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'} mr-2"></i>${message}</span>
+                    <button onclick="this.parentElement.parentElement.remove()" class="text-gray-600 hover:text-gray-800">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            `;
+            statusDiv.appendChild(alertDiv);
+
+            // Auto-remove after 5 seconds
+            setTimeout(() => alertDiv.remove(), 5000);
+        }
+
+        // Drag and drop for extract archive
+        const extractUploadArea = document.getElementById('extractUploadArea');
+        const extractArchiveFile = document.getElementById('extractArchiveFile');
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            extractUploadArea.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            extractUploadArea.addEventListener(eventName, () => {
+                extractUploadArea.classList.add('dragover');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            extractUploadArea.addEventListener(eventName, () => {
+                extractUploadArea.classList.remove('dragover');
+            }, false);
+        });
+
+        extractUploadArea.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            extractArchiveFile.files = files;
+            handleExtractFileSelect();
+        }, false);
+
+        extractArchiveFile.addEventListener('change', handleExtractFileSelect);
+
+        function handleExtractFileSelect() {
+            const file = extractArchiveFile.files[0];
+            if (file) {
+                document.getElementById('extractFileName').textContent = `Selected: ${file.name}`;
+                document.getElementById('extractFileName').classList.remove('hidden');
+                document.getElementById('extractArchiveBtn').disabled = false;
+            }
+        }
+
+        // Extract Archive
+        document.getElementById('extractArchiveBtn').addEventListener('click', async () => {
+            const file = extractArchiveFile.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const btn = document.getElementById('extractArchiveBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Extracting...';
+
+            try {
+                const response = await axios.post('/api/extract-archive', formData);
+                const data = response.data;
+
+                showStatus(`Successfully extracted ${data.files.length} files!`, 'success');
+
+                // Show results
+                document.getElementById('extractResults').classList.remove('hidden');
+                const fileList = document.getElementById('extractFileList');
+                fileList.innerHTML = data.files.map(f => `<li><i class="fas fa-file text-gray-400 mr-2"></i>${f}</li>`).join('');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-box-open mr-2"></i>Extract Archive';
+            }
+        });
+
+        // Repack Archive
+        document.getElementById('repackArchiveBtn').addEventListener('click', async () => {
+            const inputDir = document.getElementById('repackInputDir').value;
+            const outputName = document.getElementById('repackOutputName').value;
+
+            if (!inputDir) {
+                showStatus('Please enter input directory path', 'warning');
+                return;
+            }
+
+            const btn = document.getElementById('repackArchiveBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Repacking...';
+
+            try {
+                const response = await axios.post('/api/repack-archive', {
+                    input_dir: inputDir,
+                    output_name: outputName
+                });
+
+                showStatus('Archive repacked successfully!', 'success');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-compress mr-2"></i>Repack Archive';
+            }
+        });
+
+        // Analyze Archive
+        const analyzeArchiveFile = document.getElementById('analyzeArchiveFile');
+        analyzeArchiveFile.addEventListener('change', () => {
+            document.getElementById('analyzeArchiveBtn').disabled = !analyzeArchiveFile.files[0];
+        });
+
+        document.getElementById('analyzeArchiveBtn').addEventListener('click', async () => {
+            const file = analyzeArchiveFile.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const btn = document.getElementById('analyzeArchiveBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Analyzing...';
+
+            try {
+                const response = await axios.post('/api/analyze-archive', formData);
+                const data = response.data;
+
+                // Show results
+                document.getElementById('analyzeResults').classList.remove('hidden');
+                document.getElementById('analyzeFileCount').textContent = data.file_count;
+                document.getElementById('analyzeTotalSize').textContent = (data.total_size / 1024 / 1024).toFixed(2) + ' MB';
+
+                // Calculate average compression
+                let avgCompression = 0;
+                if (data.files.length > 0) {
+                    avgCompression = data.files.reduce((sum, f) => {
+                        return sum + (f.size > 0 ? (1 - f.compressed_size / f.size) : 0);
+                    }, 0) / data.files.length * 100;
+                }
+                document.getElementById('analyzeCompression').textContent = avgCompression.toFixed(1) + '%';
+
+                // Populate table
+                const table = document.getElementById('analyzeFileTable');
+                table.innerHTML = data.files.map(f => `
+                    <tr class="border-b border-gray-200 hover:bg-gray-100">
+                        <td class="p-2">${f.path}</td>
+                        <td class="p-2 text-right">${(f.size / 1024).toFixed(1)} KB</td>
+                        <td class="p-2 text-right">${(f.compressed_size / 1024).toFixed(1)} KB</td>
+                        <td class="p-2 text-right">${f.compression_ratio}</td>
+                    </tr>
+                `).join('');
+
+                showStatus('Analysis complete!', 'success');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-search mr-2"></i>Analyze';
+            }
+        });
+
+        // Decrypt Script
+        const decryptScriptFile = document.getElementById('decryptScriptFile');
+        decryptScriptFile.addEventListener('change', () => {
+            document.getElementById('decryptScriptBtn').disabled = !decryptScriptFile.files[0];
+        });
+
+        document.getElementById('decryptScriptBtn').addEventListener('click', async () => {
+            const file = decryptScriptFile.files[0];
+            const type = document.getElementById('decryptScriptType').value;
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('type', type);
+
+            const btn = document.getElementById('decryptScriptBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Decrypting...';
+
+            try {
+                const response = await axios.post('/api/decrypt-script', formData);
+                const data = response.data;
+
+                showStatus('Script decrypted successfully!', 'success');
+
+                // Show preview
+                document.getElementById('decryptPreview').classList.remove('hidden');
+                document.getElementById('decryptPreviewText').textContent = data.preview;
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-unlock mr-2"></i>Decrypt Script';
+            }
+        });
+
+        // Encrypt Script
+        const encryptScriptFile = document.getElementById('encryptScriptFile');
+        encryptScriptFile.addEventListener('change', () => {
+            document.getElementById('encryptScriptBtn').disabled = !encryptScriptFile.files[0];
+        });
+
+        document.getElementById('encryptScriptBtn').addEventListener('click', async () => {
+            const file = encryptScriptFile.files[0];
+            const type = document.getElementById('encryptScriptType').value;
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('type', type);
+
+            const btn = document.getElementById('encryptScriptBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Encrypting...';
+
+            try {
+                const response = await axios.post('/api/encrypt-script', formData);
+                showStatus('Script encrypted successfully!', 'success');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-lock mr-2"></i>Encrypt Script';
+            }
+        });
+
+        // Extract Text
+        const extractTextFile = document.getElementById('extractTextFile');
+        extractTextFile.addEventListener('change', () => {
+            document.getElementById('extractTextBtn').disabled = !extractTextFile.files[0];
+        });
+
+        document.getElementById('extractTextBtn').addEventListener('click', async () => {
+            const file = extractTextFile.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const btn = document.getElementById('extractTextBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Extracting...';
+
+            try {
+                const response = await axios.post('/api/extract-text', formData);
+                const data = response.data;
+
+                showStatus(`Extracted ${data.count} text strings!`, 'success');
+
+                // Show results
+                document.getElementById('extractTextResults').classList.remove('hidden');
+                document.getElementById('extractTextCount').textContent = data.count;
+                document.getElementById('extractTextPreview').textContent = JSON.stringify(data.preview, null, 2);
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-file-export mr-2"></i>Extract Text';
+            }
+        });
+
+        // Insert Text
+        document.getElementById('insertTextBtn').addEventListener('click', async () => {
+            const scriptPath = document.getElementById('insertScriptPath').value;
+            const jsonPath = document.getElementById('insertJsonPath').value;
+
+            if (!scriptPath || !jsonPath) {
+                showStatus('Please enter both file paths', 'warning');
+                return;
+            }
+
+            const btn = document.getElementById('insertTextBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Inserting...';
+
+            try {
+                await axios.post('/api/insert-text', {
+                    script_file: scriptPath,
+                    json_file: jsonPath
+                });
+
+                showStatus('Text inserted successfully!', 'success');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-file-import mr-2"></i>Insert Text';
+            }
+        });
+
+        // Translation
+        document.getElementById('translateUseDictionary').addEventListener('change', (e) => {
+            document.getElementById('dictionaryFileSection').style.display = e.target.checked ? 'block' : 'none';
+        });
+
+        document.getElementById('translateBtn').addEventListener('click', async () => {
+            const inputFile = document.getElementById('translateInputFile').value;
+            const provider = document.getElementById('translateProvider').value;
+            const apiKey = document.getElementById('translateApiKey').value;
+            const model = document.getElementById('translateModel').value;
+            const sourceLang = document.getElementById('translateSourceLang').value;
+            const targetLang = document.getElementById('translateTargetLang').value;
+            const useSJIS = document.getElementById('translateUseSJIS').checked;
+            const useDictionary = document.getElementById('translateUseDictionary').checked;
+            const dictionaryFile = document.getElementById('translateDictionaryFile').value;
+            const useQA = document.getElementById('translateUseQA').checked;
+
+            if (!inputFile || !apiKey) {
+                showStatus('Please fill in required fields (input file and API key)', 'warning');
+                return;
+            }
+
+            const btn = document.getElementById('translateBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Translating...';
+
+            document.getElementById('translateProgress').classList.remove('hidden');
+
+            try {
+                await axios.post('/api/translate', {
+                    input_file: inputFile,
+                    provider: provider,
+                    api_key: apiKey,
+                    model: model,
+                    source_lang: sourceLang,
+                    target_lang: targetLang,
+                    use_sjis_tunnel: useSJIS,
+                    use_dictionary: useDictionary,
+                    dictionary_file: dictionaryFile,
+                    use_qa: useQA
+                });
+
+                showStatus('Translation completed successfully!', 'success');
+                document.getElementById('translateProgressBar').style.width = '100%';
+                document.getElementById('translateProgressText').textContent = 'Complete!';
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-language mr-2"></i>Start Translation';
+            }
+        });
+
+        // SJIS Tunneling
+        document.getElementById('sjisEncodeBtn').addEventListener('click', async () => {
+            const text = document.getElementById('sjisInputText').value;
+            if (!text) return;
+
+            try {
+                const response = await axios.post('/api/sjis-tunnel/encode', { text });
+                const data = response.data;
+
+                document.getElementById('sjisOutput').classList.remove('hidden');
+                document.getElementById('sjisOutputText').value = data.encoded;
+
+                if (Object.keys(data.mapping).length > 0) {
+                    document.getElementById('sjisMapping').classList.remove('hidden');
+                    document.getElementById('sjisMappingText').textContent = JSON.stringify(data.mapping, null, 2);
+                }
+
+                showStatus('Text encoded successfully!', 'success');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            }
+        });
+
+        document.getElementById('sjisDecodeBtn').addEventListener('click', async () => {
+            const text = document.getElementById('sjisInputText').value;
+            if (!text) return;
+
+            try {
+                // Get mapping from previous encode if available
+                let mapping = {};
+                const mappingText = document.getElementById('sjisMappingText').textContent;
+                if (mappingText) {
+                    mapping = JSON.parse(mappingText);
+                }
+
+                const response = await axios.post('/api/sjis-tunnel/decode', { text, mapping });
+                const data = response.data;
+
+                document.getElementById('sjisOutput').classList.remove('hidden');
+                document.getElementById('sjisOutputText').value = data.decoded;
+
+                showStatus('Text decoded successfully!', 'success');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            }
+        });
+
+        // Word Wrapping
+        document.getElementById('wrapTextBtn').addEventListener('click', async () => {
+            const text = document.getElementById('wrapInputText').value;
+            const maxWidth = document.getElementById('wrapMaxWidth').value;
+            const fontType = document.getElementById('wrapFontType').value;
+
+            if (!text) return;
+
+            try {
+                const response = await axios.post('/api/word-wrap', {
+                    text,
+                    max_width: maxWidth,
+                    font_type: fontType
+                });
+                const data = response.data;
+
+                document.getElementById('wrapOutput').classList.remove('hidden');
+                document.getElementById('wrapOutputText').value = data.wrapped;
+
+                showStatus('Text wrapped successfully!', 'success');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            }
+        });
+
+        // Format Conversion
+        const convertFile = document.getElementById('convertFile');
+        convertFile.addEventListener('change', () => {
+            document.getElementById('convertBtn').disabled = !convertFile.files[0];
+        });
+
+        document.getElementById('convertBtn').addEventListener('click', async () => {
+            const file = convertFile.files[0];
+            const format = document.getElementById('convertFormat').value;
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('format', format);
+
+            const btn = document.getElementById('convertBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Converting...';
+
+            try {
+                await axios.post('/api/convert-format', formData);
+                showStatus('Format converted successfully!', 'success');
+
+            } catch (error) {
+                showStatus('Error: ' + (error.response?.data?.error || error.message), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>Convert Format';
+            }
+        });
+
+        // Initialize first tab as active
+        document.querySelector('.tab-btn').click();
+    </script>
+</body>
+</html>
