@@ -28,6 +28,10 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional, BinaryIO, Any
 from dataclasses import dataclass, field
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nnn_engine as nne  # noqa: E402
+import llm_translate as llm  # noqa: E402
+
 
 # =============================================================================
 # Utility Functions
@@ -537,175 +541,59 @@ def is_spt_file(data: bytes) -> bool:
 # SJIS Tunneling - Character Mapping for Unsupported Characters
 # =============================================================================
 
-class SJISTunnelEncoder:
+class SJISTunnelEncoder(nne.SJISTunnel):
     """
-    SJIS Tunneling encoder for mapping unsupported characters to unused SJIS code points.
+    VNTextProxy-compatible SJIS tunneling (same algorithm and sjis_ext.bin
+    layout as arcusmaximus' VNTextPatch).
 
-    Inspired by VNTextPatch's technique to enable non-Japanese characters in SJIS games.
-    Maps unsupported characters (like Western punctuation, accents) to unused SJIS byte sequences.
-    The mapping is stored in sjis_ext.bin for use with VNTextProxy or similar tools.
-
-    This solves the punctuation display issues reported in System-NNN games like Mugen Kairou 2.
+    Characters CP932 cannot encode get a code made of an SJIS lead byte and an
+    invalid trail byte (0x01-0x3F). Real Japanese characters are never touched.
+    sjis_ext.bin is the list of tunneled characters as raw UTF-16LE; put it next
+    to the game exe together with VNTextProxy, which draws the real glyphs.
     """
 
-    # SJIS lead byte ranges (excluding user-defined and reserved ranges)
-    # We use 0x81-0x9F and 0xE0-0xEC (being conservative to avoid conflicts)
-    LEAD_BYTES = list(range(0x81, 0xA0)) + list(range(0xE0, 0xED))
+    def encode(self, text: str, encoding: str = 'cp932') -> bytes:
+        return b''.join(self.encode_char(c) for c in text)
 
-    # Trail bytes - avoid control characters and common delimiters
-    # Skip: \t (0x09), \n (0x0A), \r (0x0D), space (0x20), comma (0x2C)
-    TRAIL_BYTES = [b for b in range(0x40, 0xFF)
-                   if b not in [0x09, 0x0A, 0x0D, 0x20, 0x2C, 0x7F]]
+    def tunnel_index(self, hi: int, lo: int) -> int:
+        rev = {self.tunnel_bytes(c): i for i, c in enumerate(self.chars)}
+        return rev.get(bytes([hi, lo]), -1)
 
-    MAX_MAPPINGS = len(LEAD_BYTES) * len(TRAIL_BYTES)  # ~4000+ slots
-
-    def __init__(self):
-        self.char_to_tunnel: Dict[str, bytes] = {}
-        self.tunnel_to_char: Dict[bytes, str] = {}
-        self.next_slot = 0
-
-    def encode(self, text: str, encoding: str = 'shift_jis') -> bytes:
-        """
-        Encode text to SJIS with tunneling for unsupported characters.
-
-        Args:
-            text: String to encode
-            encoding: Base encoding (default: shift_jis)
-
-        Returns:
-            Encoded bytes with tunneled characters
-        """
-        result = bytearray()
-
-        for char in text:
-            # Try normal SJIS encoding first
-            try:
-                char_bytes = char.encode(encoding, errors='strict')
-                # Check if it's in safe SJIS range
-                if len(char_bytes) == 1 or (len(char_bytes) == 2 and char_bytes[0] < 0xF0):
-                    result.extend(char_bytes)
-                    continue
-            except UnicodeEncodeError:
-                pass
-
-            # Character not supported - use tunnel
-            if char not in self.char_to_tunnel:
-                self._allocate_tunnel(char)
-
-            result.extend(self.char_to_tunnel[char])
-
-        return bytes(result)
-
-    def decode(self, data: bytes, encoding: str = 'shift_jis') -> str:
-        """
-        Decode SJIS bytes with tunnel character restoration.
-
-        Args:
-            data: Bytes to decode
-            encoding: Base encoding (default: shift_jis)
-
-        Returns:
-            Decoded string with tunnel characters restored
-        """
-        result = []
+    def decode(self, data: bytes, encoding: str = 'cp932') -> str:
+        rev = {self.tunnel_bytes(c): i for i, c in enumerate(self.chars)}
+        out = []
         i = 0
-
         while i < len(data):
-            # Check for 2-byte sequence
-            if i + 1 < len(data):
-                two_bytes = data[i:i+2]
-                if two_bytes in self.tunnel_to_char:
-                    result.append(self.tunnel_to_char[two_bytes])
-                    i += 2
-                    continue
-
-            # Try normal SJIS decoding
-            try:
-                # Check if it's a lead byte
-                if data[i] in self.LEAD_BYTES and i + 1 < len(data):
-                    char = data[i:i+2].decode(encoding, errors='strict')
-                    result.append(char)
-                    i += 2
-                else:
-                    char = bytes([data[i]]).decode(encoding, errors='strict')
-                    result.append(char)
-                    i += 1
-            except (UnicodeDecodeError, IndexError):
-                # Skip invalid byte
+            b = data[i]
+            if (0x81 <= b < 0xA0) or (0xE0 <= b < 0xFD):
+                if i + 1 < len(data):
+                    idx = rev.get(data[i:i + 2], -1)
+                    if idx >= 0:
+                        out.append(self.chars[idx])
+                    else:
+                        out.append(data[i:i + 2].decode('cp932', 'replace'))
+                i += 2
+            else:
+                out.append(bytes([b]).decode('cp932', 'replace'))
                 i += 1
-
-        return ''.join(result)
-
-    def _allocate_tunnel(self, char: str):
-        """Allocate a tunnel byte sequence for an unsupported character."""
-        if self.next_slot >= self.MAX_MAPPINGS:
-            raise Exception(f"SJIS tunnel limit exceeded ({self.MAX_MAPPINGS} chars)")
-
-        # Calculate lead and trail bytes
-        lead_idx = self.next_slot // len(self.TRAIL_BYTES)
-        trail_idx = self.next_slot % len(self.TRAIL_BYTES)
-
-        lead_byte = self.LEAD_BYTES[lead_idx]
-        trail_byte = self.TRAIL_BYTES[trail_idx]
-
-        tunnel_bytes = bytes([lead_byte, trail_byte])
-
-        self.char_to_tunnel[char] = tunnel_bytes
-        self.tunnel_to_char[tunnel_bytes] = char
-        self.next_slot += 1
+        return ''.join(out)
 
     def save_mapping(self, filepath: str):
-        """
-        Save character mapping to sjis_ext.bin file.
-
-        Format: For each mapping, store 4 bytes:
-        - 2 bytes: tunnel sequence (lead + trail)
-        - 2 bytes: original character UTF-16LE
-        """
-        with open(filepath, 'wb') as f:
-            # Write header: version (1 byte) + count (2 bytes)
-            f.write(bytes([0x01]))  # Version 1
-            f.write(struct.pack('<H', len(self.char_to_tunnel)))
-
-            # Write mappings
-            for char, tunnel_bytes in sorted(self.char_to_tunnel.items()):
-                f.write(tunnel_bytes)  # 2 bytes
-                f.write(char.encode('utf-16le'))  # 2 bytes (assuming BMP)
+        self.save(filepath)
 
     def load_mapping(self, filepath: str):
-        """Load character mapping from sjis_ext.bin file."""
-        if not os.path.exists(filepath):
-            return
+        if os.path.exists(filepath):
+            self.load(filepath)
 
-        with open(filepath, 'rb') as f:
-            # Read header
-            version = f.read(1)[0]
-            if version != 0x01:
-                print(f"Warning: Unknown sjis_ext.bin version: {version}")
-                return
+    def get_mapping(self) -> Dict[str, str]:
+        return {self.tunnel_bytes(c).hex(): c for c in list(self.chars)}
 
-            count = struct.unpack('<H', f.read(2))[0]
-
-            # Read mappings
-            for _ in range(count):
-                tunnel_bytes = f.read(2)
-                char_bytes = f.read(2)
-                char = char_bytes.decode('utf-16le')
-
-                self.char_to_tunnel[char] = tunnel_bytes
-                self.tunnel_to_char[tunnel_bytes] = char
-
-            self.next_slot = len(self.char_to_tunnel)
-
-    def get_stats(self) -> Dict[str, int]:
-        """Get tunneling statistics."""
+    def get_stats(self) -> Dict[str, Any]:
         return {
-            'mapped_chars': len(self.char_to_tunnel),
-            'available_slots': self.MAX_MAPPINGS - self.next_slot,
-            'usage_percent': (self.next_slot / self.MAX_MAPPINGS) * 100
+            'mapped_chars': len(self.chars),
+            'available_slots': self.LIMIT - len(self.chars),
+            'usage_percent': len(self.chars) / self.LIMIT * 100,
         }
-
-
 # =============================================================================
 # Character Name Management
 # =============================================================================
@@ -901,382 +789,34 @@ class WordWrapper:
 
 
 # =============================================================================
-# SPT Script Parser
+# SPT Script Parser (table-based, see nnn_engine.py)
 # =============================================================================
 
-@dataclass
-class SPTString:
-    """Represents an extractable text string from SPT script."""
-    index: int
-    offset: int
-    original: str
-    translated: str = ""
-    context: str = ""
+SPTString = nne.SPTEntry
 
 
-class SPTScript:
+class SPTScript(nne.SPTScript):
     """
-    Parser for SPT script files (Mugen Kairou 2, etc.).
-    XOR 0xFF encrypted, Shift-JIS text encoding.
+    SPT script (System-NNN / BlackCyc / Mugen Kairou 2 ...).
+
+    Strings are read through the two pointer tables in the header, so every
+    message and choice is found exactly, with the speaker name split off.
+    Rebuilding writes a translation in place when it fits and otherwise appends
+    it to the end of the file and repoints its table entry, so translations can
+    be any length without breaking the bytecode.
     """
 
-    def __init__(self):
-        self.strings: List[SPTString] = []
-        self.raw_data: bytes = b''
-        self.decrypted_data: bytes = b''
-
-    def parse(self, data: bytes) -> bool:
-        """Parse SPT script and extract text strings."""
-        self.raw_data = data
-        self.decrypted_data = spt_decrypt(data)
-
-        # Check signature
-        if len(self.decrypted_data) < 0x40:
-            return False
-
-        signature = self.decrypted_data[0x30:0x3A]
-        if not signature.startswith(b'SPTHEADER'):
-            print(f"Not a valid SPT file (got: {signature})")
-            return False
-
-        # Extract Shift-JIS strings
-        self._extract_shiftjis_strings()
-        return True
-
-    def _extract_shiftjis_strings(self):
-        """Extract Shift-JIS encoded text strings.
-
-        SPT format has text strings that are null-terminated.
-        After null byte, there's typically a 1-byte control/command code before the text.
-        Pattern: 00 <control_byte> <actual_text> 00
-
-        Control bytes can be in ranges 0x40-0x7F (ASCII) or 0xA0-0xFF (half-width katakana range).
-        Real text starts with 0x81-0x9F (Shift-JIS symbols/hiragana/katakana/kanji).
-        """
-        data = self.decrypted_data
-        i = 0x1000  # Skip header/code area
-        idx = 0
-
-        while i < len(data) - 2:
-            # Look for null byte followed by text
-            if data[i] == 0:
-                j = i + 1
-
-                # Skip consecutive nulls
-                while j < len(data) and data[j] == 0:
-                    j += 1
-
-                if j >= len(data):
-                    break
-
-                # Skip control byte(s) until we find a valid text start
-                # Valid text usually starts with:
-                # - 0x8140 (full-width space)
-                # - 0x8167 (")  0x8175 (「) - quotes
-                # - 0x834X (katakana ク, ケ, etc. for names)
-                # - 0x89XX-0x9FXX (kanji)
-                # Control bytes can be ANY byte including valid Shift-JIS first bytes
-                max_skip = 6
-                while j < len(data) - 1 and data[j] != 0 and j - i <= max_skip:
-                    b = data[j]
-                    b2 = data[j + 1] if j + 1 < len(data) else 0
-
-                    # Definitely valid text starts:
-                    # Full-width space (81 40)
-                    if b == 0x81 and b2 == 0x40:
-                        break
-                    # Opening quotes/brackets (81 67=", 81 75=「, 81 77=『)
-                    if b == 0x81 and b2 in [0x67, 0x68, 0x75, 0x77]:
-                        break
-                    # Kanji (88-9F as first byte, almost always real text)
-                    if 0x88 <= b <= 0x9F:
-                        break
-                    # Common katakana names (83 4X-5X range: ク, ケ, コ, etc.)
-                    if b == 0x83 and 0x4E <= b2 <= 0x96:  # Common katakana
-                        break
-                    # Hiragana (82 9F-F1: あ-ん)
-                    if b == 0x82 and 0x9F <= b2 <= 0xF1:
-                        break
-
-                    # Skip this byte pair if it's Shift-JIS (likely control)
-                    if 0x81 <= b <= 0x9F or 0xE0 <= b <= 0xEF:
-                        j += 2
-                    else:
-                        j += 1
-
-                if j < len(data) - 1 and (0x81 <= data[j] <= 0x9F or 0xE0 <= data[j] <= 0xEF):
-                    start = j
-                    end = j
-
-                    # Read continuous text
-                    while end < len(data):
-                        b = data[end]
-                        if b == 0:
-                            break
-                        # Shift-JIS multi-byte (0x81-0x9F, 0xE0-0xEF are first bytes)
-                        if 0x81 <= b <= 0x9F or 0xE0 <= b <= 0xEF:
-                            if end + 1 < len(data):
-                                end += 2
-                            else:
-                                break
-                        # ASCII printable + newlines
-                        elif 0x20 <= b <= 0x7E or b in [0x0A, 0x0D]:
-                            end += 1
-                        # Half-width katakana (only within text, not as control)
-                        elif 0xA1 <= b <= 0xDF:
-                            end += 1
-                        else:
-                            break
-
-                    if end > start + 4:
-                        try:
-                            text = data[start:end].decode('shift-jis', errors='strict')
-                            # Must contain actual Japanese text (hiragana/katakana/kanji)
-                            has_japanese = any(
-                                0x3040 <= ord(c) <= 0x30FF or  # Hiragana/Katakana
-                                0x4E00 <= ord(c) <= 0x9FFF     # Kanji
-                                for c in text
-                            )
-                            if len(text) >= 2 and has_japanese:
-                                # Clean up: remove garbage prefix characters
-                                # These are control codes that got decoded as text
-                                text = self._clean_text_prefix(text)
-                                if text and len(text) >= 2:
-                                    self.strings.append(SPTString(
-                                        index=idx,
-                                        offset=start,
-                                        original=text
-                                    ))
-                                    idx += 1
-                                i = end
-                                continue
-                        except:
-                            pass
-            i += 1
-
-    def _clean_text_prefix(self, text: str) -> str:
-        """Remove garbage control code prefixes from text.
-
-        SPT files have control bytes before text that can decode as valid
-        but meaningless Shift-JIS characters. We need to find the actual
-        text start.
-        """
-        import re
-
-        # For dialogue lines (name + newline + bracket), find the actual name
-        # Pattern: <garbage><name>\n「<dialogue>
-        # Common names: 奥様, クラスメイト, "たろ", "しろ", ハナ, etc.
-
-        # Check for dialogue pattern
-        if '\n「' in text or '\n『' in text:
-            # Find the bracket position
-            bracket_match = re.search(r'\n[「『]', text)
-            if bracket_match:
-                before_bracket = text[:bracket_match.start()]
-                after_bracket = text[bracket_match.start():]
-
-                # Clean up the name part (before bracket)
-                # Look for known character name patterns
-                name_patterns = [
-                    r'(奥様)',
-                    r'(クラスメイト[ＡＢＣ]?)',
-                    r'("たろ")',
-                    r'("しろ")',
-                    r'(奈菜香)',
-                    r'(百合絵)',
-                    r'(祐美子)',
-                    r'(薫子)',
-                    r'(ハナ)',
-                    r'(グモルク)',
-                    r'(女の子[ＡＢ]?)',
-                    r'(通行人[ＡＢＣＤＥＦＧ]?)',
-                    r'(アナウンス)',
-                ]
-
-                for pattern in name_patterns:
-                    match = re.search(pattern, before_bracket)
-                    if match:
-                        # Return name + bracket + dialogue
-                        return match.group(1) + after_bracket
-
-                # If no known name, try to find katakana word at the end
-                kata_match = re.search(r'([ァ-ヶー]+[ＡＢＣ]?)$', before_bracket)
-                if kata_match:
-                    name = kata_match.group(1)
-                    # Fix common truncations
-                    if name == 'ラスメイトＡ' or name == 'ラスメイト':
-                        name = 'クラスメイトＡ'
-                    return name + after_bracket
-
-                # Try to find quoted name pattern at the end
-                quote_match = re.search(r'("[\w]+")$', before_bracket)
-                if quote_match:
-                    return quote_match.group(1) + after_bracket
-
-                # Try partial quote at end
-                partial_quote = re.search(r'([\w]+")\s*$', before_bracket)
-                if partial_quote:
-                    name = '"' + partial_quote.group(1)
-                    return name + after_bracket
-
-                # If no match, try to clean leading garbage
-                cleaned = self._clean_leading_garbage(before_bracket)
-                return cleaned + after_bracket
-
-        # For non-dialogue lines, just clean leading garbage
-        return self._clean_leading_garbage(text)
-
-    def _clean_leading_garbage(self, text: str) -> str:
-        """Remove garbage characters from the start of text."""
-        # Known garbage patterns (control codes that decode as text)
-        garbage_patterns = [
-            'ブャN', 'ｃN', '泣N', '轤ﾈ', '焉@', 'ﾈた', 'ｳ゛', '黶@',
-            '諱', '轣', '驍', '齦', '齬', '謔', '閧', '黷',  # Common garbage kanji
-            '＝@', 'た　', 'し　', 'ぁ　', 'い　', 'に　', 'か　', 'は　',  # Single kana + space
-        ]
-        for pattern in garbage_patterns:
-            if text.startswith(pattern):
-                text = text[len(pattern):]
-
-        # Fix known truncated patterns
-        if text.startswith('ラスメイトＡ'):
-            text = 'ク' + text
-        if text.startswith('ラスメイト\n'):
-            text = 'ク' + text
-        if text.startswith('たろ"'):
-            text = '"' + text
-
-        while text:
-            c = text[0]
-            code = ord(c)
-
-            # Keep: full-width space, quotes, brackets, normal punctuation after text
-            if c in '　 "「『（【':
-                break
-
-            # Keep: kanji
-            if 0x4E00 <= code <= 0x9FFF:
-                break
-
-            # Keep: hiragana if followed by more text (part of a word)
-            if 0x3041 <= code <= 0x3096:  # Hiragana
-                if len(text) > 1:
-                    next_c = ord(text[1])
-                    # If followed by more Japanese text, keep it
-                    if (0x3040 <= next_c <= 0x30FF or
-                        0x4E00 <= next_c <= 0x9FFF or
-                        next_c == 0x3000):  # Full-width space
-                        break
-                    # Single hiragana followed by space might be valid
-                    if text[1] in '　 ':
-                        # Check if it's common patterns like "が　" "は　" etc.
-                        if c in 'がはもをにでとへや':
-                            break
-                # Remove isolated hiragana
-                text = text[1:]
-                continue
-
-            # Keep: katakana word (2+ consecutive katakana)
-            if 0x30A0 <= code <= 0x30FF:  # Katakana
-                if len(text) > 1 and 0x30A0 <= ord(text[1]) <= 0x30FF:
-                    break
-                # Single katakana is garbage
-                text = text[1:]
-                continue
-
-            # Skip: punctuation at start
-            if c in '、。？！…―゛゜':
-                text = text[1:]
-                continue
-
-            # Skip: small kana (usually garbage when alone)
-            if c in 'ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ':
-                text = text[1:]
-                continue
-
-            # Skip: half-width katakana
-            if 0xFF61 <= code <= 0xFF9F:
-                text = text[1:]
-                continue
-
-            # Skip: ASCII letters alone (control codes)
-            if 0x41 <= code <= 0x5A or 0x61 <= code <= 0x7A:
-                if len(text) > 1 and ord(text[1]) >= 0x80:
-                    # ASCII followed by Japanese = control byte
-                    text = text[1:]
-                    continue
-                break
-
-            # Default: keep
-            break
-
-        return text
-
-    def export_strings(self, filepath: str):
-        """Export strings to JSON for translation."""
-        export_data = {
-            'source_file': '',
-            'format': 'spt-shiftjis',
-            'string_count': len(self.strings),
-            'strings': [
-                {
-                    'index': s.index,
-                    'offset': s.offset,
-                    'original': s.original,
-                    'translated': s.translated,
-                    'context': s.context
-                }
-                for s in self.strings
-            ]
-        }
-
+    def export_strings(self, filepath: str, source_file: str = ''):
         with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(export_data, f, ensure_ascii=False, indent=2)
+            json.dump(self.to_json(source_file), f, ensure_ascii=False, indent=2)
 
     def import_strings(self, filepath: str):
-        """Import translated strings from JSON."""
         with open(filepath, 'r', encoding='utf-8') as f:
-            import_data = json.load(f)
+            self.import_json(json.load(f))
 
-        translation_map = {
-            s['index']: s.get('translated', '')
-            for s in import_data.get('strings', [])
-        }
-
-        for string in self.strings:
-            if string.index in translation_map:
-                string.translated = translation_map[string.index]
-
-    def rebuild(self) -> bytes:
-        """Rebuild SPT file with translated strings."""
-        result = bytearray(self.decrypted_data)
-
-        # Sort strings by offset in reverse to avoid shifting issues
-        sorted_strings = sorted(self.strings, key=lambda s: s.offset, reverse=True)
-
-        for string in sorted_strings:
-            if not string.translated:
-                continue
-
-            # Find original string end (null terminator)
-            orig_end = string.offset
-            while orig_end < len(result) and result[orig_end] != 0:
-                orig_end += 1
-
-            # Encode new string
-            try:
-                new_bytes = string.translated.encode('shift-jis')
-            except UnicodeEncodeError:
-                print(f"Warning: Could not encode string at index {string.index}")
-                continue
-
-            # Replace
-            result[string.offset:orig_end] = new_bytes
-
-        # Re-encrypt
-        return spt_encrypt(bytes(result))
-
-
+    def rebuild(self, encoder: Optional['nne.MessageEncoder'] = None,
+                names: Optional[Dict[str, str]] = None) -> bytes:
+        return super().rebuild(encoder or nne.MessageEncoder(), names)
 # =============================================================================
 # HXB Text String
 # =============================================================================
@@ -1960,325 +1500,239 @@ def is_nnn_file(data: bytes) -> bool:
 
 
 # =============================================================================
-# LLM Translation Engine
+# LLM Translation (context-aware, chunked; see llm_translate.py)
 # =============================================================================
 
-class TranslationCache:
-    """Simple cache to avoid re-translating identical strings."""
-
-    def __init__(self, cache_file: Optional[str] = None):
-        self.cache: Dict[str, str] = {}
-        self.cache_file = cache_file
-        if cache_file and os.path.exists(cache_file):
-            self._load()
-
-    def _load(self):
-        try:
-            with open(self.cache_file, 'r', encoding='utf-8') as f:
-                self.cache = json.load(f)
-        except:
-            self.cache = {}
-
-    def save(self):
-        if self.cache_file:
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.cache, f, ensure_ascii=False, indent=2)
-
-    def get(self, text: str) -> Optional[str]:
-        return self.cache.get(text)
-
-    def set(self, original: str, translated: str):
-        self.cache[original] = translated
+Line = llm.Line
 
 
-class LLMTranslator:
-    """Base class for LLM-based translation."""
-
-    def __init__(self,
-                 api_key: Optional[str] = None,
-                 model: str = "",
-                 base_url: Optional[str] = None,
-                 target_lang: str = "English",
-                 context: str = ""):
-        self.api_key = api_key
-        self.model = model
-        self.base_url = base_url
-        self.target_lang = target_lang
-        self.context = context
-        self.cache = TranslationCache()
-
-    def translate_batch(self, texts: List[str], batch_size: int = 10) -> List[str]:
-        """Translate a batch of texts."""
-        results = []
-
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            batch_results = []
-
-            for text in batch:
-                # Check cache first
-                cached = self.cache.get(text)
-                if cached:
-                    batch_results.append(cached)
-                    continue
-
-                # Translate
-                try:
-                    translated = self._translate_single(text)
-                    self.cache.set(text, translated)
-                    batch_results.append(translated)
-                except Exception as e:
-                    print(f"Translation error: {e}")
-                    batch_results.append("")
-
-                # Rate limiting
-                time.sleep(0.5)
-
-            results.extend(batch_results)
-            print(f"  Translated {min(i + batch_size, len(texts))}/{len(texts)}")
-
-        self.cache.save()
-        return results
-
-    def _translate_single(self, text: str) -> str:
-        """Translate a single text. Override in subclasses."""
-        raise NotImplementedError
-
-    def _build_prompt(self, text: str) -> str:
-        """Build translation prompt."""
-        context_str = f"\nContext: {self.context}" if self.context else ""
-        return f"""Translate the following Japanese visual novel text to {self.target_lang}.
-Preserve the original meaning and tone. Keep character names unchanged.
-Maintain any formatting like newlines.{context_str}
-
-Japanese text:
-{text}
-
-{self.target_lang} translation:"""
+def load_doc(path: str) -> dict:
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
 
-class OpenAITranslator(LLMTranslator):
-    """OpenAI API translator (also works with compatible APIs)."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.model = self.model or "gpt-4o-mini"
-        self.base_url = self.base_url or "https://api.openai.com/v1"
-
-    def _translate_single(self, text: str) -> str:
-        try:
-            import urllib.request
-            import urllib.error
-        except ImportError:
-            raise RuntimeError("urllib required for API calls")
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-
-        data = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": f"You are a professional Japanese to {self.target_lang} translator specializing in visual novels. Translate accurately while preserving the original tone and style."},
-                {"role": "user", "content": self._build_prompt(text)}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 2000
-        }
-
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(data).encode('utf-8'),
-            headers=headers,
-            method='POST'
-        )
-
-        try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result['choices'][0]['message']['content'].strip()
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8') if e.fp else str(e)
-            raise RuntimeError(f"API error {e.code}: {error_body}")
+def save_doc(path: str, doc: dict):
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
-class AnthropicTranslator(LLMTranslator):
-    """Anthropic Claude API translator."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.model = self.model or "claude-3-haiku-20240307"
-        self.base_url = "https://api.anthropic.com/v1"
-
-    def _translate_single(self, text: str) -> str:
-        try:
-            import urllib.request
-            import urllib.error
-        except ImportError:
-            raise RuntimeError("urllib required for API calls")
-
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01"
-        }
-
-        data = {
-            "model": self.model,
-            "max_tokens": 2000,
-            "messages": [
-                {"role": "user", "content": self._build_prompt(text)}
-            ]
-        }
-
-        req = urllib.request.Request(
-            f"{self.base_url}/messages",
-            data=json.dumps(data).encode('utf-8'),
-            headers=headers,
-            method='POST'
-        )
-
-        try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result['content'][0]['text'].strip()
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8') if e.fp else str(e)
-            raise RuntimeError(f"API error {e.code}: {error_body}")
+def entry_id(s: dict) -> str:
+    return str(s.get('id', s.get('index')))
 
 
-class DeepLTranslator(LLMTranslator):
-    """DeepL API translator."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # Detect if using free or pro API
-        if self.api_key and self.api_key.endswith(':fx'):
-            self.base_url = "https://api-free.deepl.com/v2"
-        else:
-            self.base_url = "https://api.deepl.com/v2"
-
-        # Map language names to DeepL codes
-        self.lang_map = {
-            "english": "EN",
-            "portuguese": "PT-BR",
-            "spanish": "ES",
-            "french": "FR",
-            "german": "DE",
-            "italian": "IT",
-            "dutch": "NL",
-            "polish": "PL",
-            "russian": "RU",
-            "chinese": "ZH",
-            "korean": "KO"
-        }
-
-    def _translate_single(self, text: str) -> str:
-        try:
-            import urllib.request
-            import urllib.error
-            import urllib.parse
-        except ImportError:
-            raise RuntimeError("urllib required for API calls")
-
-        target_lang = self.lang_map.get(self.target_lang.lower(), "EN")
-
-        data = urllib.parse.urlencode({
-            "auth_key": self.api_key,
-            "text": text,
-            "source_lang": "JA",
-            "target_lang": target_lang
-        }).encode('utf-8')
-
-        req = urllib.request.Request(
-            f"{self.base_url}/translate",
-            data=data,
-            method='POST'
-        )
-
-        try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result['translations'][0]['text']
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8') if e.fp else str(e)
-            raise RuntimeError(f"API error {e.code}: {error_body}")
+def source_text(doc: dict, s: dict) -> str:
+    """Text sent to the translator. SPT originals are unwrapped: the Japanese
+    line breaks and full-width indents are layout, re-done at insert time."""
+    text = s.get('original', '')
+    if doc.get('format') == 'spt-table':
+        text = text.replace('\r\n', '\n').rstrip('\n')
+        text = re.sub(r'\n[　 ]*(?=\S)', '', text)
+    return text
 
 
-def get_translator(api: str, **kwargs) -> LLMTranslator:
-    """Factory function to get the appropriate translator."""
-    translators = {
-        "openai": OpenAITranslator,
-        "anthropic": AnthropicTranslator,
-        "deepl": DeepLTranslator,
-        "openai-compatible": OpenAITranslator,  # Same as OpenAI but with custom base_url
-    }
-
-    if api not in translators:
-        raise ValueError(f"Unknown API: {api}. Available: {list(translators.keys())}")
-
-    return translators[api](**kwargs)
+def doc_lines(doc: dict) -> List[Line]:
+    return [Line(id=entry_id(s), text=source_text(doc, s), name=s.get('name', '') or '')
+            for s in doc.get('strings', [])]
 
 
-def translate_json_file(input_path: str, output_path: str, translator: LLMTranslator) -> bool:
-    """Translate a JSON file containing extracted strings."""
-    print(f"Loading: {input_path}")
+def load_style_guide(path: Optional[str]) -> str:
+    if not path:
+        return ''
+    with open(path, 'r', encoding='utf-8') as f:
+        return f.read().strip()
 
-    with open(input_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
 
-    # Handle both VNTools and VNT formats
-    if isinstance(data, list):
-        # VNT format
-        texts = [item.get('message', '') for item in data]
-        print(f"Found {len(texts)} strings (VNT format)")
+def apply_results(doc: dict, results: Dict[str, str], dictionary: Optional['GPTDictionary'] = None,
+                  overwrite: bool = False):
+    for s in doc.get('strings', []):
+        sid = entry_id(s)
+        if sid in results and (overwrite or not s.get('translated')):
+            text = results[sid]
+            if dictionary:
+                text = dictionary.apply_post_processing(text)
+            s['translated'] = text
+        if dictionary and s.get('name') and not s.get('name_translated'):
+            nm = dictionary.post_translation.get(s['name'])
+            if nm:
+                s['name_translated'] = nm
 
-        translations = translator.translate_batch(texts)
 
-        for i, item in enumerate(data):
-            if translations[i]:
-                item['translated'] = translations[i]
-    else:
-        # VNTools format
-        strings = data.get('strings', [])
-        texts = [s.get('original', '') for s in strings if not s.get('translated')]
-        print(f"Found {len(texts)} untranslated strings")
+def make_chunk_translator(api: str, api_key: str = '', model: str = '', base_url: str = '',
+                          target_lang: str = 'English', effort: str = 'medium',
+                          chunk_size: int = 30, context_lines: int = 8,
+                          dictionary: Optional['GPTDictionary'] = None, style_guide: str = '',
+                          notes: str = '', dict_context: str = '') -> 'llm.ChunkTranslator':
+    backend = llm.make_backend(api, api_key=api_key, model=model, base_url=base_url,
+                               target_lang=target_lang, effort=effort)
+    glossary = dictionary.get_context_prompt(dict_context) if dictionary else ''
+    if api == 'deepl':
+        chunk_size = min(chunk_size, 50)
+    return llm.ChunkTranslator(backend, chunk_size=chunk_size, context_lines=context_lines,
+                               glossary=glossary, style_guide=style_guide, notes=notes)
 
-        if not texts:
-            print("All strings already translated!")
-            return True
 
-        translations = translator.translate_batch(texts)
+def translate_json_file(input_path: str, output_path: str, translator: 'llm.ChunkTranslator',
+                        dictionary: Optional['GPTDictionary'] = None,
+                        overwrite: bool = False, **_ignored) -> bool:
+    """Translate one VNTools JSON. Progress is saved after every chunk, so an
+    interrupted run resumes where it stopped (already translated lines are kept
+    unless overwrite=True)."""
+    doc = load_doc(output_path if os.path.exists(output_path) and not overwrite else input_path)
+    lines = doc_lines(doc)
+    done = {} if overwrite else {entry_id(s): s['translated']
+                                 for s in doc.get('strings', []) if s.get('translated')}
+    print(f'Translating {input_path}: {len(lines) - len(done)} of {len(lines)} lines to do')
 
-        trans_idx = 0
-        for s in strings:
-            if not s.get('translated') and trans_idx < len(translations):
-                s['translated'] = translations[trans_idx]
-                trans_idx += 1
+    def progress(res):
+        apply_results(doc, res, dictionary, overwrite=True)
+        save_doc(output_path, doc)
 
-    # Save
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    print(f"Saved to: {output_path}")
+    res = translator.translate(lines, done=done, on_progress=progress)
+    apply_results(doc, res, dictionary, overwrite=True)
+    save_doc(output_path, doc)
+    u = translator.backend.usage
+    if u['input'] or u['output']:
+        print(f"  tokens so far: {u['input']} in ({u['cache_read']} cached), {u['output']} out")
     return True
 
 
-def translate_directory(input_dir: str, output_dir: str, translator: LLMTranslator) -> bool:
-    """Translate all JSON files in a directory."""
+def translate_directory(input_dir: str, output_dir: str, translator: 'llm.ChunkTranslator',
+                        dictionary: Optional['GPTDictionary'] = None, overwrite: bool = False,
+                        batch_api: bool = False) -> bool:
     os.makedirs(output_dir, exist_ok=True)
-
-    json_files = list(Path(input_dir).glob('*.json'))
-    print(f"Found {len(json_files)} JSON files")
-
-    for json_file in json_files:
-        output_file = Path(output_dir) / json_file.name
-        translate_json_file(str(json_file), str(output_file), translator)
-
+    files = sorted(Path(input_dir).glob('*.json'))
+    if batch_api:
+        prepared = []
+        docs = {}
+        for p in files:
+            out = os.path.join(output_dir, p.name)
+            doc = load_doc(out if os.path.exists(out) and not overwrite else str(p))
+            done = {} if overwrite else {entry_id(s): s['translated']
+                                         for s in doc.get('strings', []) if s.get('translated')}
+            docs[p.name] = (doc, out)
+            prepared.append((p.name, doc_lines(doc), done))
+        results = translator.translate_batch_api(prepared)
+        for name, (doc, out) in docs.items():
+            apply_results(doc, results.get(name, {}), dictionary, overwrite=True)
+            save_doc(out, doc)
+        print(f'Batch finished: {sum(len(v) for v in results.values())} lines translated')
+        return True
+    for p in files:
+        translate_json_file(str(p), os.path.join(output_dir, p.name), translator,
+                            dictionary=dictionary, overwrite=overwrite)
     return True
 
 
+def build_glossary_file(input_path: str, dict_path: str, api: str, api_key: str, model: str = '',
+                        base_url: str = '', target_lang: str = 'English',
+                        charaname: Optional[str] = None) -> bool:
+    paths = sorted(Path(input_path).glob('*.json')) if os.path.isdir(input_path) else [Path(input_path)]
+    lines: List[Line] = []
+    for p in paths:
+        lines += doc_lines(load_doc(str(p)))
+    extra = nne.read_charaname(charaname) if charaname else []
+    backend = llm.make_backend(api, api_key=api_key, model=model, base_url=base_url,
+                               target_lang=target_lang, effort='high')
+    terms = llm.build_glossary(backend, lines, extra)
+    d = GPTDictionary(dict_path)
+    added = 0
+    for t in terms:
+        src, tgt = t.get('source', ''), t.get('target', '')
+        if not src or not tgt or src in d.post_translation:
+            continue
+        d.add_post_translation(src, tgt)
+        if t.get('kind') == 'character' and t.get('note'):
+            d.add_character_context(f'{tgt} ({src})', t['note'])
+        elif t.get('note'):
+            d.add_pre_translation(src, t['note'])
+        added += 1
+    d.save()
+    print(f'Glossary: {added} new terms written to {dict_path} (review it before translating)')
+    return True
+
+
+# =============================================================================
+# GalTransl / LinguaGacha interchange (json_jp list of {name, message})
+# =============================================================================
+
+def export_galtransl(input_path: str, output_dir: str) -> int:
+    os.makedirs(output_dir, exist_ok=True)
+    paths = sorted(Path(input_path).glob('*.json')) if os.path.isdir(input_path) else [Path(input_path)]
+    n = 0
+    for p in paths:
+        doc = load_doc(str(p))
+        items = []
+        for s in doc.get('strings', []):
+            item = {}
+            if s.get('name'):
+                item['name'] = s['name']
+            item['message'] = source_text(doc, s)
+            items.append(item)
+        with open(os.path.join(output_dir, p.name), 'w', encoding='utf-8') as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+        n += len(items)
+    print(f'Exported {n} lines to {output_dir} (GalTransl json_jp / LinguaGacha MESSAGEJSON)')
+    return n
+
+
+def import_galtransl(json_dir: str, translated_dir: str, output_dir: str) -> int:
+    os.makedirs(output_dir, exist_ok=True)
+    n = 0
+    for p in sorted(Path(json_dir).glob('*.json')):
+        tp = Path(translated_dir) / p.name
+        if not tp.exists():
+            continue
+        doc = load_doc(str(p))
+        items = load_doc(str(tp))
+        strings = doc.get('strings', [])
+        if len(items) != len(strings):
+            print(f'  {p.name}: {len(items)} translated lines but {len(strings)} expected, skipped')
+            continue
+        for s, it in zip(strings, items):
+            msg = it.get('message') or it.get('dst') or ''
+            if msg and msg != source_text(doc, s):
+                s['translated'] = msg
+                n += 1
+            nm = it.get('name')
+            if s.get('name') and nm and nm != s['name']:
+                s['name_translated'] = nm
+        save_doc(str(Path(output_dir) / p.name), doc)
+    print(f'Imported {n} translations into {output_dir}')
+    return n
+
+
+def migrate_old_spt_json(old_path: str, new_path: str, output_path: str) -> int:
+    """Carry translations from a pre-2.0 (heuristic) SPT JSON into a new
+    table-based extraction by matching the Japanese text."""
+    old = load_doc(old_path)
+    new = load_doc(new_path)
+
+    def norm(t: str) -> str:
+        return re.sub(r'\s+', '', t.replace('\r', ''))
+
+    table = {}
+    for s in old.get('strings', []):
+        if s.get('translated'):
+            o = norm(s.get('original', ''))
+            for k in range(0, 3):  # old extractor kept up to 2 junk chars
+                table.setdefault(o[k:], s['translated'])
+    n = 0
+    for s in new.get('strings', []):
+        full = norm((s.get('name', '') or '') + s.get('original', ''))
+        body = norm(s.get('original', ''))
+        tr = table.get(full) or table.get(body)
+        if tr and not s.get('translated'):
+            if s.get('name') and '\n' in tr.replace('\r\n', '\n'):
+                head, rest = tr.replace('\r\n', '\n').split('\n', 1)
+                s['name_translated'] = head.strip()
+                tr = rest
+            s['translated'] = tr
+            n += 1
+    save_doc(output_path, new)
+    print(f'Migrated {n} translations')
+    return n
 # =============================================================================
 # Export Format Conversion
 # =============================================================================
@@ -2671,195 +2125,352 @@ class CheckpointManager:
 # CLI Interface
 # =============================================================================
 
+def _api_key(api: str, given: Optional[str]) -> str:
+    key = given or os.environ.get(llm.API_KEY_ENV.get(api, ''), '')
+    return key
+
+
+def insert_text_cli(script: str, translation: str, output: str, wrap: str = 'auto',
+                    code_byte: int = 2, tunnel_path: Optional[str] = None,
+                    names_path: Optional[str] = None, spt_key: Optional[str] = None,
+                    max_lines: int = 0) -> bool:
+    with open(script, 'rb') as f:
+        data = f.read()
+    if not nne.is_spt_data(data, spt_key):
+        return insert_text(script, translation, output)
+
+    spt = SPTScript(spt_key)
+    if not spt.parse(data):
+        print('Failed to parse SPT script')
+        return False
+    spt.import_strings(translation)
+    width, orig_lines = nne.measure_layout(spt.entries)
+    if wrap == 'auto':
+        # Original width is measured in full-width cells; codeByte=1 halves Latin letters.
+        wrap_width = width
+    else:
+        wrap_width = int(wrap)
+    if wrap_width:
+        for e in spt.entries:
+            if e.translated and e.kind == 'message':
+                e.translated = nne.wrap_text(e.translated, wrap_width, code_byte)
+    names = {}
+    if names_path and os.path.exists(names_path):
+        if names_path.endswith('.json'):
+            d = load_doc(names_path)
+            names = d.get('post_translation', d) if isinstance(d, dict) else {}
+    tunnel = SJISTunnelEncoder(tunnel_path) if tunnel_path else None
+    if code_byte == 1 and tunnel:
+        print('  ! --tunnel is ignored with --code-byte 1 (single-byte mode is ASCII only)')
+        tunnel = None
+    encoder = nne.MessageEncoder(tunnel=tunnel, code_byte=code_byte)
+    if code_byte == 1:
+        untranslated = sorted({e.name for e in spt.entries
+                               if e.name and not e.name_translated and e.name not in names})
+        if untranslated:
+            print('  ! codeByte 1 cannot draw Japanese; untranslated speaker names: '
+                  + ', '.join(untranslated[:15]) + ' (use --names gpt_dictionary.json)')
+    out = spt.rebuild(encoder, names)
+    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+    with open(output, 'wb') as f:
+        f.write(out)
+    if tunnel:
+        tunnel.save_mapping(tunnel_path)
+    limit = max_lines or orig_lines
+    over = [e.id for e in spt.entries if e.translated and e.kind == 'message'
+            and len(e.translated.rstrip('\n').split('\n')) > limit]
+    n = sum(1 for e in spt.entries if e.translated)
+    print(f'{os.path.basename(script)}: {n} translated, wrap {wrap_width} units '
+          f'(codeByte {code_byte}), window {orig_lines} lines')
+    if over:
+        print(f'  ! {len(over)} messages longer than {limit} lines: {", ".join(over[:10])}'
+              + (' ...' if len(over) > 10 else ''))
+    for w in sorted(set(encoder.warnings))[:10]:
+        print(f'  ! {w}')
+    return True
+
+
+def qa_cli(path: str, code_byte: int = 2, width: int = 0, dictionary: Optional['GPTDictionary'] = None,
+           tunnel: bool = False) -> int:
+    paths = sorted(Path(path).glob('*.json')) if os.path.isdir(path) else [Path(path)]
+    total = 0
+    for p in paths:
+        doc = load_doc(str(p))
+        strings = doc.get('strings', [])
+        is_spt = doc.get('format') == 'spt-table'
+        w, lines_max = (0, 0)
+        if is_spt:
+            ents = [nne.SPTEntry(id=s['id'], table=1, slot=0, word=0, raw=b'', text=s.get('original', ''),
+                                 kind=s.get('kind', 'message')) for s in strings]
+            w, lines_max = nne.measure_layout(ents)
+        w = width or w
+        qa = TranslationQA(dictionary=dictionary)
+        report = []
+        missing = 0
+        for s in strings:
+            tr = s.get('translated', '')
+            if not tr:
+                missing += 1
+                continue
+            issues = qa.validate(s.get('original', ''), tr, s.get('index', 0))
+            if is_spt:
+                # SPT text is unwrapped for translation and re-wrapped on insert,
+                # so the generic line-break / length heuristics do not apply.
+                issues = [i for i in issues if not i.startswith(('Line break mismatch', 'Translation too long'))]
+            if is_spt and s.get('kind') == 'message':
+                wrapped = nne.wrap_text(tr, w, code_byte) if w else tr
+                extra = nne.qa_entry(s.get('original', ''), wrapped, w, lines_max, code_byte, tunnel)
+                if any(i.startswith('Contains untranslated Japanese') for i in issues):
+                    extra = [i for i in extra if i != 'still contains Japanese']
+                issues += extra
+            if issues:
+                report.append((entry_id(s), issues))
+        total += len(report)
+        if report or missing:
+            print(f'{p.name}: {len(report)} lines with issues, {missing} untranslated')
+            for sid, issues in report[:50]:
+                print(f'  [{sid}] ' + '; '.join(dict.fromkeys(issues)))
+    print(f'QA done: {total} lines with issues')
+    return total
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='SystemNNN/PIL/SLASH Visual Novel Tools',
+        description='System-NNN / DDSystem / BlackCyc visual novel translation tools',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
-Examples:
-  # Extract archive
-  %(prog)s extract archive.dat -o extracted/
+Typical System-NNN (Mugen Kairou 2) workflow:
+  %(prog)s probe-exe game/mugen2.exe
+  %(prog)s extract-text game/spt/ -o jp/
+  %(prog)s glossary jp/ --api anthropic --charaname game/spt/charaname.xtx -d gpt_dictionary.json
+  %(prog)s translate jp/ -o en/ --api anthropic -d gpt_dictionary.json --style-guide style.md
+  %(prog)s qa en/
+  %(prog)s insert-text game/spt/ en/ -o patch/spt/ --wrap auto
+  %(prog)s nnn-config set game/ game codeByte 1     # if probe-exe says it is supported
 
-  # Extract text from all scripts
-  %(prog)s extract-text extracted/ -o translations/
+DDSystem (.dat archives with HXB scripts):
+  %(prog)s extract sin_text.dat -o extracted/
+  %(prog)s extract-text extracted/ -o jp/
+  ... translate / qa ...
+  %(prog)s insert-text extracted/main05.hxb en/main05.json -o patched/main05.hxb
+  %(prog)s repack patched/ -o sin_text_patched.dat
 
-  # Translate with OpenAI
-  %(prog)s translate translations/ -o translated/ --api openai
+Other translators:
+  %(prog)s export-galtransl jp/ -o galtransl/json_jp/     # GalTransl / LinguaGacha
+  %(prog)s import-galtransl jp/ galtransl/json_cn/ -o en/
 
-  # Translate with Claude
-  %(prog)s translate translations/ -o translated/ --api anthropic
+API keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPL_API_KEY (or --api-key)
+''')
+    sub = parser.add_subparsers(dest='command', help='Available commands')
 
-  # Translate with local LLM (Ollama, LM Studio, etc.)
-  %(prog)s translate translations/ -o translated/ --api openai-compatible --base-url http://localhost:11434/v1
+    p = sub.add_parser('extract', help='Extract DDP archive')
+    p.add_argument('archive')
+    p.add_argument('-o', '--output')
+    p.add_argument('--no-decrypt', action='store_true', help='Do not decrypt HXB files')
 
-  # Translate with DeepL
-  %(prog)s translate translations/ -o translated/ --api deepl --lang Portuguese
+    p = sub.add_parser('extract-text', help='Extract text from scripts (SPT/HXB/NNN)')
+    p.add_argument('input', help='Script file or directory')
+    p.add_argument('-o', '--output', help='Output JSON file or directory')
+    p.add_argument('--format', choices=['vntools', 'vnt'], default='vntools')
+    p.add_argument('--spt-key', help='Custom SPT key "xor,addXor,addInc" (default 0xFFFFFFFF,0,0)')
 
-  # Insert translations and create patched scripts
-  %(prog)s insert-text extracted/main05.hxb translations/main05.json -o patched/main05.hxb
+    p = sub.add_parser('translate', help='Translate JSON files with an LLM or DeepL')
+    p.add_argument('input', help='JSON file or directory')
+    p.add_argument('-o', '--output', help='Output JSON file or directory')
+    p.add_argument('--api', required=True, choices=['anthropic', 'openai', 'openai-compatible', 'deepl'])
+    p.add_argument('--api-key')
+    p.add_argument('--model', help='Model (defaults: anthropic=claude-opus-5-5, openai=gpt-5-mini)')
+    p.add_argument('--effort', default='medium', choices=['low', 'medium', 'high', 'xhigh', 'max'],
+                   help='Anthropic effort level (default medium)')
+    p.add_argument('--base-url', help='Server URL for openai-compatible (e.g. http://localhost:11434/v1)')
+    p.add_argument('--lang', default='English', help='Target language')
+    p.add_argument('-d', '--dictionary', help='gpt_dictionary.json (names, terms, character notes)')
+    p.add_argument('--style-guide', help='Markdown/text file with translation rules')
+    p.add_argument('--context', default='', help='Extra notes for the translator (game premise, etc.)')
+    p.add_argument('--chunk-size', type=int, default=30, help='Lines per request (default 30)')
+    p.add_argument('--context-lines', type=int, default=8, help='Previous lines sent as context')
+    p.add_argument('--batch-api', action='store_true',
+                   help='Anthropic Message Batches: half price, asynchronous (directories only)')
+    p.add_argument('--overwrite', action='store_true', help='Retranslate lines that already have a translation')
 
-  # Repack archive
-  %(prog)s repack patched/ -o archive_patched.dat
+    p = sub.add_parser('glossary', help='Bootstrap gpt_dictionary.json (names/terms) with an LLM')
+    p.add_argument('input', help='Extracted JSON file or directory')
+    p.add_argument('-d', '--dictionary', default='gpt_dictionary.json')
+    p.add_argument('--api', required=True, choices=['anthropic', 'openai', 'openai-compatible'])
+    p.add_argument('--api-key')
+    p.add_argument('--model')
+    p.add_argument('--base-url')
+    p.add_argument('--lang', default='English')
+    p.add_argument('--charaname', help='spt/charaname.xtx from the game (extra name list)')
 
-  # Convert JSON to VNTranslationTools format
-  %(prog)s convert-format input.json -o output.json --format vnt
+    p = sub.add_parser('qa', help='Check translations (codes, encoding, line width, leftovers)')
+    p.add_argument('input', help='Translated JSON file or directory')
+    p.add_argument('--code-byte', type=int, choices=[1, 2], default=2)
+    p.add_argument('--width', type=int, default=0, help='Line width in half-width units (default: from original)')
+    p.add_argument('-d', '--dictionary')
+    p.add_argument('--tunnel', action='store_true', help='Characters will be SJIS-tunneled')
 
-  # Analyze archive
-  %(prog)s analyze archive.dat
+    p = sub.add_parser('insert-text', help='Insert translations into scripts')
+    p.add_argument('script', help='Original script file or directory')
+    p.add_argument('translation', help='Translation JSON file or directory')
+    p.add_argument('-o', '--output', required=True, help='Output script file or directory')
+    p.add_argument('--wrap', default='auto',
+                   help='SPT: line width in half-width units, "auto" (= original width) or 0 for none')
+    p.add_argument('--code-byte', type=int, choices=[1, 2], default=2,
+                   help='2 (default): ASCII shown full-width; 1: game set to codeByte 1 (half-width Latin)')
+    p.add_argument('--max-lines', type=int, default=0, help='Warn above this many lines (default: original)')
+    p.add_argument('--tunnel', metavar='SJIS_EXT_BIN',
+                   help='Tunnel characters CP932 lacks into this sjis_ext.bin (for VNTextProxy)')
+    p.add_argument('--names', help='JSON with name translations (gpt_dictionary.json works)')
+    p.add_argument('--spt-key')
 
-Environment variables for API keys:
-  OPENAI_API_KEY      - OpenAI API key
-  ANTHROPIC_API_KEY   - Anthropic API key
-  DEEPL_API_KEY       - DeepL API key
-'''
-    )
+    p = sub.add_parser('export-galtransl', help='Export to GalTransl json_jp / LinguaGacha format')
+    p.add_argument('input')
+    p.add_argument('-o', '--output', required=True)
 
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    p = sub.add_parser('import-galtransl', help='Import GalTransl/LinguaGacha output')
+    p.add_argument('jp_json', help='Directory of extracted VNTools JSON')
+    p.add_argument('translated', help='Directory of translated GalTransl JSON')
+    p.add_argument('-o', '--output', required=True)
 
-    # Extract command
-    extract_parser = subparsers.add_parser('extract', help='Extract DDP archive')
-    extract_parser.add_argument('archive', help='Path to DDP archive')
-    extract_parser.add_argument('-o', '--output', help='Output directory')
-    extract_parser.add_argument('--no-decrypt', action='store_true', help='Do not decrypt HXB files')
+    p = sub.add_parser('migrate-json', help='Carry translations from an old (pre-2.0) SPT JSON to a new extraction')
+    p.add_argument('old')
+    p.add_argument('new')
+    p.add_argument('-o', '--output', required=True)
 
-    # Extract text command
-    extract_text_parser = subparsers.add_parser('extract-text', help='Extract text from scripts (HXB/SPT/NNN)')
-    extract_text_parser.add_argument('input', help='Script file or directory')
-    extract_text_parser.add_argument('-o', '--output', help='Output JSON file or directory')
-    extract_text_parser.add_argument('--format', choices=['vntools', 'vnt'], default='vntools',
-                                     help='Output format: vntools (default) or vnt (VNTranslationTools)')
+    p = sub.add_parser('nnn-config', help='Read/edit init/*.xtx and init2/*.fxf engine settings')
+    p.add_argument('action', choices=['show', 'set', 'decode', 'encode'])
+    p.add_argument('path', help='Game folder (show/set) or a .xtx/.fxf file (decode/encode)')
+    p.add_argument('args', nargs='*', help='set: <file> <key> <value>, e.g. game codeByte 1')
+    p.add_argument('-o', '--output')
 
-    # Translate command (NEW!)
-    translate_parser = subparsers.add_parser('translate', help='Translate JSON files using LLM APIs')
-    translate_parser.add_argument('input', help='JSON file or directory')
-    translate_parser.add_argument('-o', '--output', help='Output JSON file or directory')
-    translate_parser.add_argument('--api', required=True,
-                                  choices=['openai', 'anthropic', 'deepl', 'openai-compatible'],
-                                  help='Translation API to use')
-    translate_parser.add_argument('--api-key', help='API key (or use environment variable)')
-    translate_parser.add_argument('--model', help='Model name (optional, uses default)')
-    translate_parser.add_argument('--base-url', help='Base URL for OpenAI-compatible APIs')
-    translate_parser.add_argument('--lang', default='English', help='Target language (default: English)')
-    translate_parser.add_argument('--context', default='', help='Additional context for translation')
+    p = sub.add_parser('probe-exe', help='Check which translation-friendly engine options a game exe supports')
+    p.add_argument('exe')
 
-    # Convert format command (NEW!)
-    convert_parser = subparsers.add_parser('convert-format', help='Convert between JSON formats')
-    convert_parser.add_argument('input', help='Input JSON file')
-    convert_parser.add_argument('-o', '--output', required=True, help='Output JSON file')
-    convert_parser.add_argument('--format', choices=['vnt', 'vntools'], default='vnt',
-                                help='Target format: vnt (VNTranslationTools) or vntools')
+    p = sub.add_parser('convert-format', help='Convert between VNTools and VNTranslationTools JSON')
+    p.add_argument('input')
+    p.add_argument('-o', '--output', required=True)
+    p.add_argument('--format', choices=['vnt', 'vntools'], default='vnt')
 
-    # Insert text command
-    insert_parser = subparsers.add_parser('insert-text', help='Insert translated text into scripts')
-    insert_parser.add_argument('script', help='Original script file')
-    insert_parser.add_argument('translation', help='Translation JSON file')
-    insert_parser.add_argument('-o', '--output', required=True, help='Output script file')
+    p = sub.add_parser('repack', help='Repack files into DDP archive')
+    p.add_argument('input')
+    p.add_argument('-o', '--output', required=True)
+    p.add_argument('--version', type=int, choices=[2, 3], default=3)
+    p.add_argument('--compress', action='store_true')
 
-    # Repack command
-    repack_parser = subparsers.add_parser('repack', help='Repack files into DDP archive')
-    repack_parser.add_argument('input', help='Directory containing files')
-    repack_parser.add_argument('-o', '--output', required=True, help='Output archive path')
-    repack_parser.add_argument('--version', type=int, choices=[2, 3], default=3, help='DDP version')
-    repack_parser.add_argument('--compress', action='store_true', help='Compress files')
-
-    # Analyze command
-    analyze_parser = subparsers.add_parser('analyze', help='Analyze archive structure')
-    analyze_parser.add_argument('archive', help='Path to DDP archive')
+    p = sub.add_parser('analyze', help='Analyze archive structure')
+    p.add_argument('archive')
 
     args = parser.parse_args()
+    cmd = args.command
 
-    if args.command == 'extract':
-        output = args.output or args.archive + '_extracted'
-        extract_archive(args.archive, output, decrypt=not args.no_decrypt)
+    if cmd == 'extract':
+        extract_archive(args.archive, args.output or args.archive + '_extracted', decrypt=not args.no_decrypt)
 
-    elif args.command == 'extract-text':
-        input_path = Path(args.input)
-        output_format = getattr(args, 'format', 'vntools')
-
-        if input_path.is_dir():
-            output = args.output or str(input_path) + '_text'
-            extract_all_text_with_format(str(input_path), output, output_format)
+    elif cmd == 'extract-text':
+        ip = Path(args.input)
+        if ip.is_dir():
+            extract_all_text_with_format(str(ip), args.output or str(ip) + '_text', args.format, args.spt_key)
         else:
-            output = args.output or str(input_path.with_suffix('.json'))
-            extract_text_with_format(str(input_path), output, output_format)
+            extract_text_with_format(str(ip), args.output or str(ip.with_suffix('.json')), args.format, args.spt_key)
 
-    elif args.command == 'translate':
-        # Get API key from args or environment
-        api_key = args.api_key
-        if not api_key:
-            env_keys = {
-                'openai': 'OPENAI_API_KEY',
-                'openai-compatible': 'OPENAI_API_KEY',
-                'anthropic': 'ANTHROPIC_API_KEY',
-                'deepl': 'DEEPL_API_KEY'
-            }
-            env_var = env_keys.get(args.api)
-            api_key = os.environ.get(env_var, '')
-
-        if not api_key:
-            print(f"Error: API key required. Set {env_keys.get(args.api)} or use --api-key")
+    elif cmd == 'translate':
+        key = _api_key(args.api, args.api_key)
+        if not key and args.api in ('openai', 'deepl'):
+            print(f'Error: set {llm.API_KEY_ENV[args.api]} or use --api-key')
             sys.exit(1)
-
-        # Create translator
-        translator = get_translator(
-            args.api,
-            api_key=api_key,
-            model=args.model or "",
-            base_url=args.base_url,
-            target_lang=args.lang,
-            context=args.context
-        )
-
-        input_path = Path(args.input)
-        if input_path.is_dir():
-            output = args.output or str(input_path) + '_translated'
-            translate_directory(str(input_path), output, translator)
+        dictionary = GPTDictionary(args.dictionary) if args.dictionary else None
+        ip = Path(args.input)
+        common = dict(api_key=key, model=args.model or '', base_url=args.base_url or '',
+                      target_lang=args.lang, effort=args.effort, chunk_size=args.chunk_size,
+                      context_lines=args.context_lines, dictionary=dictionary,
+                      style_guide=load_style_guide(args.style_guide), notes=args.context)
+        if ip.is_dir():
+            out = args.output or str(ip) + '_translated'
+            if args.batch_api:
+                tr = make_chunk_translator(args.api, **common)
+                translate_directory(str(ip), out, tr, dictionary, args.overwrite, batch_api=True)
+            else:
+                os.makedirs(out, exist_ok=True)
+                for f in sorted(ip.glob('*.json')):
+                    tr = make_chunk_translator(args.api, dict_context=f.stem, **common)
+                    translate_json_file(str(f), os.path.join(out, f.name), tr, dictionary, args.overwrite)
         else:
-            output = args.output or str(input_path.with_stem(input_path.stem + '_translated'))
-            translate_json_file(str(input_path), output, translator)
+            out = args.output or str(ip.with_name(ip.stem + '_translated.json'))
+            tr = make_chunk_translator(args.api, dict_context=ip.stem, **common)
+            translate_json_file(str(ip), out, tr, dictionary, args.overwrite)
 
-    elif args.command == 'convert-format':
+    elif cmd == 'glossary':
+        build_glossary_file(args.input, args.dictionary, args.api, _api_key(args.api, args.api_key),
+                            args.model or '', args.base_url or '', args.lang, args.charaname)
+
+    elif cmd == 'qa':
+        d = GPTDictionary(args.dictionary) if args.dictionary else None
+        qa_cli(args.input, args.code_byte, args.width, d, args.tunnel)
+
+    elif cmd == 'insert-text':
+        sp, tp = Path(args.script), Path(args.translation)
+        opts = dict(wrap=args.wrap, code_byte=args.code_byte, tunnel_path=args.tunnel,
+                    names_path=args.names, spt_key=args.spt_key, max_lines=args.max_lines)
+        if sp.is_dir():
+            os.makedirs(args.output, exist_ok=True)
+            for js in sorted(tp.glob('*.json')):
+                for ext in ('.spt', '.hxb', '.nnn'):
+                    cand = sp / (js.stem + ext)
+                    if cand.exists():
+                        insert_text_cli(str(cand), str(js), os.path.join(args.output, cand.name), **opts)
+                        break
+        else:
+            insert_text_cli(str(sp), str(tp), args.output, **opts)
+
+    elif cmd == 'export-galtransl':
+        export_galtransl(args.input, args.output)
+
+    elif cmd == 'import-galtransl':
+        import_galtransl(args.jp_json, args.translated, args.output)
+
+    elif cmd == 'migrate-json':
+        migrate_old_spt_json(args.old, args.new, args.output)
+
+    elif cmd == 'nnn-config':
+        nnn_config_cli(args)
+
+    elif cmd == 'probe-exe':
+        r = nne.probe_exe(args.exe)
+        print('Engine setting keys found in exe:')
+        for k, v in r['strings'].items():
+            print(f'  {"yes" if v else " no"}  {k}')
+        print('Imports / APIs referenced:')
+        for k, v in r['imports'].items():
+            if v:
+                print(f'  {k}')
+        print('\nRecommendations:')
+        for line in r['recommendations']:
+            print(f'  - {line}')
+
+    elif cmd == 'convert-format':
         if args.format == 'vnt':
             convert_to_vnt_format(args.input, args.output)
         else:
-            # Convert VNT to VNTools format
-            with open(args.input, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
+            data = load_doc(args.input)
             if isinstance(data, list):
-                vntools_data = {
-                    'source_file': '',
-                    'format': 'converted-from-vnt',
-                    'string_count': len(data),
-                    'strings': [
-                        {
-                            'index': i,
-                            'offset': 0,
-                            'original': item.get('message', ''),
-                            'translated': item.get('translated', ''),
-                            'context': item.get('name', '')
-                        }
-                        for i, item in enumerate(data)
-                    ]
-                }
-                with open(args.output, 'w', encoding='utf-8') as f:
-                    json.dump(vntools_data, f, ensure_ascii=False, indent=2)
-                print(f"Converted {len(data)} strings to VNTools format")
+                doc = {'source_file': '', 'format': 'converted-from-vnt', 'string_count': len(data),
+                       'strings': [{'index': i, 'id': str(i), 'name': it.get('name', ''),
+                                    'original': it.get('message', ''), 'translated': it.get('translated', '')}
+                                   for i, it in enumerate(data)]}
+                save_doc(args.output, doc)
+                print(f'Converted {len(data)} strings to VNTools format')
             else:
-                print("Already in VNTools format")
+                print('Already in VNTools format')
 
-    elif args.command == 'insert-text':
-        insert_text(args.script, args.translation, args.output)
-
-    elif args.command == 'repack':
+    elif cmd == 'repack':
         repack_archive(args.input, args.output, args.version, args.compress)
 
-    elif args.command == 'analyze':
+    elif cmd == 'analyze':
         archive = DDPArchive(args.archive)
         if archive.open():
             print(f"Format: DDP{archive.version}")
             print(f"Files: {len(archive.entries)}")
-            print("\nFirst 20 entries:")
             for i, entry in enumerate(archive.entries[:20]):
                 packed_info = f" (packed: {entry.packed_size})" if entry.is_packed else ""
                 print(f"  {i:4d}: {entry.name:30s} @ 0x{entry.offset:08X}  size: {entry.unpacked_size:8d}{packed_info}")
@@ -2869,67 +2480,98 @@ Environment variables for API keys:
         parser.print_help()
 
 
-def extract_text_with_format(script_path: str, output_path: str, format: str = "vntools") -> bool:
-    """Extract translatable text from a script with format option."""
-    print(f"Parsing script: {script_path}")
+def nnn_config_cli(args):
+    if args.action == 'show':
+        for fname in sorted({k[0] for k in nne.TRANSLATION_KEYS}):
+            path = nne.find_config(args.path, fname)
+            if not path:
+                print(f'{fname}: not found (init/{fname}.xtx or init2/{fname}.fxf)')
+                continue
+            cfg = nne.parse_config(nne.read_config_text(path))
+            print(f'{path}:')
+            for f2, key, desc in nne.TRANSLATION_KEYS:
+                if f2 == fname:
+                    print(f'  {key:22s} = {cfg.get(key, "(unset)"):10s}  {desc}')
+        if os.path.isdir(os.path.join(args.path, 'init2')):
+            print('\nNote: init2/ exists, so the engine reads the .fxf files there, not init/*.xtx.')
+    elif args.action == 'set':
+        if len(args.args) != 3:
+            print('usage: nnn-config set <game_dir> <file> <key> <value>   e.g. game codeByte 1')
+            sys.exit(1)
+        fname, key, value = args.args
+        path = nne.find_config(args.path, fname)
+        if not path:
+            path = os.path.join(args.path, 'init', fname + '.xtx')
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            text = ''
+        else:
+            text = nne.read_config_text(path)
+            bak = path + '.bak'
+            if not os.path.exists(bak):
+                with open(path, 'rb') as src, open(bak, 'wb') as dst:
+                    dst.write(src.read())
+        nne.write_config_text(path, nne.set_config_value(text, key, value))
+        print(f'{path}: {key} = {value}')
+    elif args.action == 'decode':
+        out = args.output or os.path.splitext(args.path)[0] + '.xtx'
+        text = nne.read_config_text(args.path)
+        with open(out, 'w', encoding='utf-8', newline='') as f:
+            f.write(text)
+        print(f'Decoded to {out} (UTF-8)')
+    elif args.action == 'encode':
+        out = args.output or os.path.splitext(args.path)[0] + '.fxf'
+        with open(args.path, 'r', encoding='utf-8', newline='') as f:
+            nne.write_config_text(out, f.read())
+        print(f'Encoded to {out}')
 
+
+def extract_text_with_format(script_path: str, output_path: str, format: str = "vntools",
+                             spt_key: Optional[str] = None) -> bool:
+    """Extract translatable text from a script (auto-detects SPT/HXB/NNN)."""
     with open(script_path, 'rb') as f:
         data = f.read()
 
-    # Auto-detect format
     if is_nnn_file(data):
-        print("Detected: NNN dev format (Shift-JIS)")
         script = NNNScript()
-    elif is_spt_file(data):
-        print("Detected: SPT format (Shift-JIS)")
-        script = SPTScript()
+    elif nne.is_spt_data(data, spt_key):
+        script = SPTScript(spt_key)
     elif len(data) >= 7 and (data[:4] == b'DDSx' or data[:4] == b'DDWu'):
-        print("Detected: HXB format (UTF-16LE)")
         if data[:4] == b'DDWu':
             data = fix_hxb_signature(data)
             data = decrypt_hxb(data)
         script = HXBScript()
     else:
-        print("Unknown script format")
+        print(f"{script_path}: unknown script format")
         return False
 
     if not script.parse(data):
-        print("Failed to parse script")
+        print(f"{script_path}: failed to parse")
         return False
 
-    print(f"Found {len(script.strings)} text strings")
-
-    # Export with format option
-    if hasattr(script, 'export_strings'):
-        if isinstance(script, NNNScript):
-            script.export_strings(output_path, format)
-        else:
-            script.export_strings(output_path)
-            # Convert if VNT format requested
-            if format == 'vnt':
-                convert_to_vnt_format(output_path, output_path)
-
-    print(f"Exported to: {output_path}")
+    if isinstance(script, NNNScript):
+        script.export_strings(output_path, format)
+    elif isinstance(script, SPTScript):
+        script.export_strings(output_path, os.path.basename(script_path))
+        if format == 'vnt':
+            convert_to_vnt_format(output_path, output_path)
+    else:
+        script.export_strings(output_path)
+        if format == 'vnt':
+            convert_to_vnt_format(output_path, output_path)
+    print(f"{os.path.basename(script_path)}: {len(script.strings)} strings -> {output_path}")
     return True
 
 
-def extract_all_text_with_format(input_dir: str, output_dir: str, format: str = "vntools") -> bool:
-    """Extract text from all scripts in a directory with format option."""
+def extract_all_text_with_format(input_dir: str, output_dir: str, format: str = "vntools",
+                                 spt_key: Optional[str] = None) -> bool:
+    """Extract text from all scripts in a directory."""
     os.makedirs(output_dir, exist_ok=True)
-
-    # Find all script files
-    hxb_files = list(Path(input_dir).glob('*.hxb'))
-    spt_files = list(Path(input_dir).glob('*.spt'))
-    nnn_files = list(Path(input_dir).glob('*.nnn'))
-    all_files = hxb_files + spt_files + nnn_files
-
-    print(f"Found {len(hxb_files)} HXB, {len(spt_files)} SPT, {len(nnn_files)} NNN files")
-
-    total_strings = 0
-    for script_path in all_files:
-        json_path = Path(output_dir) / (script_path.stem + '.json')
-        extract_text_with_format(str(script_path), str(json_path), format)
-
+    files = sorted(list(Path(input_dir).glob('*.hxb')) + list(Path(input_dir).glob('*.spt'))
+                   + list(Path(input_dir).glob('*.nnn')))
+    print(f"Found {len(files)} script files")
+    for script_path in files:
+        extract_text_with_format(str(script_path), str(Path(output_dir) / (script_path.stem + '.json')),
+                                 format, spt_key)
     return True
 
 

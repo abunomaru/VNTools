@@ -1,536 +1,213 @@
 # VNTools
 
-Personal collection of reverse engineering tools for Japanese visual novel translation patching.
+Tools for translating Japanese visual novels built on the **System-NNN** family of engines (PIL/SLASH, BlackCyc, CYCLET, …): unpack archives, extract script text, machine-translate it with context, and patch it back into the game.
 
-## Supported Engines
+## Supported engines and formats
 
-This toolkit supports games built on the **System-NNN** family of visual novel engines, developed by PIL/SLASH and related brands.
-
-### Engine Variants
-
-| Engine | Developer | Example Games |
+| Engine | Developer | Example games |
 |--------|-----------|---------------|
-| **System-NNN** | PIL/SLASH | Mugen Kairou series |
+| **System-NNN** | PIL/SLASH, BlackCyc | Mugen Kairou 2 ~Rasen~, Yami no Koe series |
 | **DDSystem** | CYCLET | Shingakkou -Noli me tangere- |
-| **BlackCyc** | BLACK CYC | Various darker-themed titles |
 
-## Supported Formats
+| Format | What it is | Status |
+|--------|-----------|--------|
+| **SPT** (`spt/*.spt`) | System-NNN compiled scripts, CP932, XOR-encrypted | extract / insert (any text length) |
+| **HXB** (`DDSxHXB`) | DDSystem scripts, UTF-16LE | extract / insert |
+| **NNN** (`--MESSAGEDATA`) | System-NNN dev scripts | extract / insert |
+| **DDP2 / DDP3** (`*.dat`) | DDSystem archives | extract / repack |
+| **XTX / FXF** (`init/*.xtx`, `init2/*.fxf`) | engine settings (fonts, text mode, layout) | read / edit |
 
-### Script Formats (Currently Implemented)
-
-| Format | Signature | Encoding | Encryption | Description |
-|--------|-----------|----------|------------|-------------|
-| **HXB** | `DDSxHXB` | UTF-16LE | XOR (length-based key) | Main script format for DDSystem/System-NNN |
-| **SPT** | `SPTHEADER0` | Shift-JIS | XOR 0xFF | Script format for newer BlackCyc games |
-| **NNN** | `--MESSAGEDATA` | Shift-JIS | None | Dev script format (VNTranslationTools compatible) |
-
-### Archive Formats (Currently Implemented)
-
-| Format | Signature | Description |
-|--------|-----------|-------------|
-| **DDP2** | `DDP2` | Older resource archive format |
-| **DDP3** | `DDP3` | Main resource archive format with UTF-16LE filenames |
-
-### Additional System-NNN Formats (Reference)
-
-These formats are used by System-NNN games but not yet implemented in this toolkit:
-
-| Format | Extension | Description |
-|--------|-----------|-------------|
-| **DWQ** | `.gtb` + `.gpk` | Image archives (BMP/JPEG with optional masks) |
-| **VAW** | `.vtb` + `.vpk` | Voice/sound effect archives |
-| **WGQ** | `.wgq` | BGM files (64-byte header + OGG data) |
-| **MFT** | `.mft` | Bitmap font files (2/4/8-bit grayscale, Shift-JIS) |
-| **XTX/FXF** | `.xtx`/`.fxf` | Encrypted script variants (XOR 0xFF) |
-
-#### DWQ Image Pack Types
-
-| Type | Description |
-|------|-------------|
-| 1 | Compressed BMP |
-| 2 | Standard BMP with alpha mask |
-| 3 | Compressed BMP with alpha mask |
-| 5 | JPEG |
-| 7 | JPEG with alpha mask |
-| 8 | PNG (some versions) |
-
-## Tested Games
-
-- 神学校 -Noli me tangere- (Shingakkou) - DDSystem
-- 夢幻廻廊2～螺旋～ (Mugen Kairou 2) - System-NNN
-- Other PIL/SLASH/BlackCyc/CYCLET titles
-
-## Features
-
-### Core Features
-- Extract DDP2/DDP3 archives
-- Decompress SHS-compressed files
-- Decrypt HXB/SPT script files
-- Parse NNN dev scripts
-- Extract translatable text strings to JSON
-- **Translate using LLM APIs** (OpenAI, Anthropic, DeepL, local LLMs)
-- Export in VNTranslationTools-compatible format
-- Reinsert translated text
-- Repack archives for creating translation patches
-
-### Advanced Translation Features ⭐ NEW
-- **SJIS Tunneling** - Map unsupported characters to unused Shift-JIS code points (solves punctuation display issues in System-NNN games)
-- **GPT Dictionary System** - Maintain consistent terminology and character name translations
-  - Pre-translation hints (Japanese term recognition)
-  - Post-translation enforcement (required translations)
-  - Conditional translations (context-specific)
-  - Character background/personality contexts
-- **Translation QA** - Automated quality validation
-  - Detects repeated words, unbalanced punctuation
-  - Flags untranslated Japanese characters
-  - Checks line break consistency
-  - Validates translation length
-  - Dictionary compliance checking
-- **Character Name Management** - Reusable character name database
-- **Word Wrapping** - Automatic line breaking for monospace/proportional fonts
-- **Checkpoint System** - Save and resume interrupted translations
-- **Translation Caching** - Avoid re-translating identical strings
+Tested on 夢幻廻廊2～螺旋～ (Mugen Kairou 2, System-NNN) and 神学校 -Noli me tangere- (DDSystem).
 
 ## Installation
 
-Requires Python 3.7+
+Requires Python 3.9+.
 
 ```bash
-# Clone the repository
-git clone https://github.com/tobidashite/VNTools.git
+git clone https://github.com/abunomaru/VNTools.git
 cd VNTools
-
-# No additional dependencies required - uses only standard library
+pip install -r requirements.txt   # only needed for the web GUI and --api anthropic
 ```
 
-## Web GUI 🎨
+The command-line tool itself uses only the Python standard library.
 
-VNTools now includes a beautiful web-based GUI with full Tailwind styling!
-
-### Quick Start
+## Quick start: System-NNN (Mugen Kairou 2)
 
 ```bash
-# Install Flask dependencies
-pip install -r requirements.txt
+# 0. See which text options this game's exe supports (see "Getting English to display well")
+python3 systemnnn_tools.py probe-exe game/mugen2.exe
 
-# Start the web server
-python3 app.py
+# 1. Extract all messages and choices to JSON (one file per script)
+python3 systemnnn_tools.py extract-text game/spt/ -o jp/
+
+# 2. Build a glossary of names and terms, then review/edit it
+python3 systemnnn_tools.py glossary jp/ --api anthropic \
+    --charaname game/spt/charaname.xtx -d gpt_dictionary.json
+
+# 3. Translate with context (resumable; progress is saved after every chunk)
+python3 systemnnn_tools.py translate jp/ -o en/ --api anthropic \
+    -d gpt_dictionary.json --style-guide style.md
+
+# 4. Check the result
+python3 systemnnn_tools.py qa en/ -d gpt_dictionary.json
+
+# 5. Write patched scripts (wraps lines to the game's text box)
+python3 systemnnn_tools.py insert-text game/spt/ en/ -o patch/spt/ --names gpt_dictionary.json
 ```
 
-Then open your browser to http://localhost:5000
+Copy `patch/spt/*.spt` over the game's `spt/` folder (keep a backup).
 
-### GUI Features
+## Getting English to display well (System-NNN)
 
-The web interface provides access to ALL VNTools functionality:
+The System-NNN engine source is public ([tinyan/SystemNNN](https://github.com/tinyan/SystemNNN)). Its message renderer explains the problems people hit with Mugen Kairou 2:
 
-- **📦 Archives Tab**
-  - Extract DDP2/DDP3 archives with drag-and-drop
-  - Repack modified files back to archives
-  - Analyze archive contents and compression ratios
+- **Wide letter spacing.** In the default text mode (`codeByte 2`) every character gets one full-width cell, and each ASCII byte is converted to its full-width form (`a` → `ａ`). Latin text therefore looks spaced out, and only about half as many letters fit on a line as you'd expect.
+- **No automatic wrapping.** The engine breaks lines only where the script contains a newline, so the patch has to wrap every message itself. `insert-text` does this, measuring the box width from the original Japanese lines.
+- **`#` is a command prefix.** `#姓`/`#名` insert the player's name, `#［…#］` is ruby, `#強` is emphasis, and `#０`–`#９` are colors. A stray `#` in a translation breaks the line, so the encoder keeps codes copied from the original and turns any other `#` into `＃`.
 
-- **📝 Scripts Tab**
-  - Decrypt HXB/SPT/NNN scripts
-  - Encrypt text files back to game format
-  - Live preview of decrypted content
+There are three ways to handle this, from easiest to most involved:
 
-- **🌐 Text Extraction Tab**
-  - Extract translatable strings to JSON
-  - Insert translated text back into scripts
-  - Preview extracted text
+1. **`codeByte 1` (built into newer engine builds).** In single-byte mode the engine draws ASCII half-width with an ANSI font (Consolas/Courier by default, or `defaultFont`). Run `probe-exe` to see whether the exe reads the `codeByte` key. If it does:
+   ```bash
+   python3 systemnnn_tools.py nnn-config set game/ game codeByte 1
+   python3 systemnnn_tools.py nnn-config set game/ game defaultFont "Segoe UI"   # optional
+   python3 systemnnn_tools.py insert-text game/spt/ en/ -o patch/spt/ --code-byte 1 --names gpt_dictionary.json
+   ```
+   Twice as many letters fit on each line. This mode is ASCII only: speaker names must be translated, and the encoder replaces smart quotes, dashes and accents with ASCII equivalents.
+2. **Keep full-width cells** (`--code-byte 2`, the default). This works on every build. Lines are short (Mugen Kairou 2 fits 20 cells × 3 lines), so ask the translator for concise English (see the style guide below). `insert-text` warns about every message that needs more lines than the window has.
+3. **VNTextProxy + SJIS tunneling.** Use this for characters CP932 doesn't have (é, —, …) and for custom fonts. `--tunnel patch/sjis_ext.bin` writes the same mapping format as arcusmaximus' VNTextPatch. Put `sjis_ext.bin` and a [VNTextProxy](https://github.com/arcusmaximus/VNTranslationTools) DLL next to the exe. A Fuwanovel thread on Mugen Kairou 2 reports that this combination with a custom font gave the best result so far. For builds with a Direct2D renderer (`useDirect2D`), [font_prop](https://github.com/louisbui63/font_prop) is a `d2d1.dll` proxy that proportionalizes the font.
 
-- **🤖 AI Translation Tab**
-  - Translate using OpenAI, Anthropic, or DeepL
-  - SJIS Tunneling support
-  - GPT Dictionary integration
-  - Automated Translation QA
-  - Real-time progress tracking
+`nnn-config show game/` lists the settings that matter (font, `codeByte`, `fontSize`, `nextX`/`nextY`, `windowMessageNumber`, …). If the game ships an `init2/` folder, the engine reads the encrypted `init2/*.fxf` instead of `init/*.xtx`. `nnn-config set` edits whichever file the engine will actually load and keeps a `.bak`.
 
-- **⚙️ Advanced Tools Tab**
-  - SJIS Tunneling encoder/decoder
-  - Word wrapping with configurable width
-  - Format conversion (VNT compatibility)
-  - Character name management
-
-- **❓ Help Tab**
-  - Complete documentation
-  - Quick start guide
-  - Pro tips and best practices
-
-### Why Use the GUI?
-
-- **User-Friendly**: No command-line experience needed
-- **Visual**: See previews and results in real-time
-- **Drag & Drop**: Easy file uploads
-- **Modern**: Beautiful Tailwind-inspired design
-- **Complete**: Every CLI feature available in the GUI
-
-## CLI Usage
-
-### 1. Extract Archive
+## AI translation
 
 ```bash
-# Extract all files from a DDP archive
-python3 systemnnn_tools.py extract sin_text.dat -o extracted/
-
-# Extract without decrypting HXB files
-python3 systemnnn_tools.py extract sin_text.dat -o extracted/ --no-decrypt
+python3 systemnnn_tools.py translate jp/ -o en/ --api anthropic            # Claude (default claude-opus-5-5)
+python3 systemnnn_tools.py translate jp/ -o en/ --api anthropic --model claude-sonnet-5-5   # cheaper
+python3 systemnnn_tools.py translate jp/ -o en/ --api anthropic --batch-api                 # 50% price, async
+python3 systemnnn_tools.py translate jp/ -o en/ --api openai --model <model>
+python3 systemnnn_tools.py translate jp/ -o en/ --api openai-compatible \
+    --base-url http://localhost:11434/v1 --model qwen3:14b                  # Ollama / LM Studio / llama.cpp
+python3 systemnnn_tools.py translate jp/ -o pt/ --api deepl --lang Portuguese
 ```
 
-### 2. Extract Text for Translation
+What it does differently from line-by-line MTL:
+
+- **Chunks with context.** It sends 30 lines per request (`--chunk-size`), each tagged with its speaker, plus the 8 preceding lines (`--context-lines`) with their translations. Japanese leaves subjects out, so the model needs the scene to get pronouns and gender right.
+- **Structured output.** The model returns JSON keyed by line id. If an id is missing or the JSON is bad, the chunk is split and retried, so lines can't shift or merge.
+- **Glossary and style guide in a cached system prompt.** `gpt_dictionary.json` holds required renderings, character notes and term hints, and `conditional` entries can be keyed by script name. `--style-guide` takes your team's rules: honorifics, quote style, tone, line length.
+- **Resumable.** Progress is saved after each chunk, and lines that already have a translation are skipped unless you pass `--overwrite`.
+- **Retries.** It backs off and retries on 429/5xx errors. For Claude, a refused request automatically falls back to another model.
+- **Batch mode.** `--batch-api` sends a whole folder through Anthropic's Message Batches API at half the price. Each chunk gets the preceding Japanese lines as context, because the earlier translations don't exist yet when the batch is built.
+
+Before translating, SPT lines are unwrapped: the Japanese line breaks and full-width indents are only layout. `insert-text` re-wraps them for the target text mode.
+
+### Glossary bootstrap
 
 ```bash
-# Extract text from all scripts in a directory (auto-detects HXB/SPT)
-python3 systemnnn_tools.py extract-text extracted/ -o translations/
-
-# Extract text from a single HXB script
-python3 systemnnn_tools.py extract-text extracted/main05.hxb -o main05.json
-
-# Extract text from SPT scripts (Mugen Kairou 2, etc.)
-python3 systemnnn_tools.py extract-text spt/ -o translations/
+python3 systemnnn_tools.py glossary jp/ --api anthropic --charaname game/spt/charaname.xtx
 ```
 
-This creates JSON files with all translatable strings:
+This collects speaker names, katakana terms and names followed by honorifics, and asks the model for consistent renderings and short character notes. The results are written to `gpt_dictionary.json`. Review the file: it is used both in the prompt and to translate name plates.
+
+### Example style guide (`style.md`)
+
+```markdown
+- Keep honorifics (-san, -chan, -sensei).
+- 「」 dialogue → "double quotes". Thoughts in （） → (parentheses).
+- Text box is 20 characters × 3 lines: prefer short sentences, avoid filler.
+- Sayoko speaks formally and teasingly; Arisu is casual and blunt.
+```
+
+### Using GalTransl or LinguaGacha instead
+
+[GalTransl](https://github.com/GalTransl/GalTransl) (agent mode, GenDic auto-glossary, Sakura models) and [LinguaGacha](https://github.com/neavo/LinguaGacha) both read the `[{"name", "message"}]` JSON format:
+
+```bash
+python3 systemnnn_tools.py export-galtransl jp/ -o galtransl_project/json_jp/
+# ... translate there ...
+python3 systemnnn_tools.py import-galtransl jp/ galtransl_project/json_cn/ -o en/
+python3 systemnnn_tools.py insert-text game/spt/ en/ -o patch/spt/
+```
+
+## Command reference
+
+| Command | Purpose |
+|---------|---------|
+| `extract ARCHIVE -o DIR` | Unpack DDP2/DDP3 (`--no-decrypt` keeps HXB encrypted) |
+| `extract-text PATH -o OUT` | Scripts → JSON (`--format vnt` for VNTranslationTools, `--spt-key` for non-standard SPT keys) |
+| `glossary PATH -d gpt_dictionary.json --api …` | LLM-built name/term glossary |
+| `translate PATH -o OUT --api …` | Context-aware translation (see above) |
+| `qa PATH` | Missing `#` codes, CP932-unencodable characters, leftover Japanese, lines too wide or too many lines, dictionary violations |
+| `insert-text SCRIPT(S) JSON(S) -o OUT` | Patch scripts (`--wrap auto\|N\|0`, `--code-byte 1\|2`, `--tunnel sjis_ext.bin`, `--names dict.json`) |
+| `export-galtransl` / `import-galtransl` | Interchange with GalTransl / LinguaGacha |
+| `migrate-json OLD NEW -o OUT` | Move translations from a pre-2.0 SPT JSON to the new table-based extraction |
+| `nnn-config show\|set\|decode\|encode` | Engine settings in `init/*.xtx` / `init2/*.fxf` |
+| `probe-exe EXE` | Which text-mode/font options and proxy DLL entry points the game supports |
+| `repack DIR -o ARCHIVE` | Build DDP2/DDP3 (`--compress`) |
+| `analyze ARCHIVE` | List archive entries |
+| `convert-format` | VNTools ⇄ VNTranslationTools JSON |
+
+API keys come from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `DEEPL_API_KEY`, or from `--api-key`.
+
+### JSON format (SPT)
 
 ```json
 {
-  "source_file": "",
-  "format": "utf-16le",
-  "string_count": 728,
+  "format": "spt-table",
+  "version": 2,
   "strings": [
-    {
-      "index": 0,
-      "offset": 256,
-      "original": "レオニードからは、今日は来なくていいと言われている。",
-      "translated": "",
-      "context": ""
-    }
+    {"id": "m2", "kind": "message", "name": "小夜子", "name_translated": "Sayoko",
+     "original": "「お久しぶりね。\n　まる２年かしら、あなたが籠ってから」\n",
+     "translated": "\"Long time no see. Has it really been two years since you shut yourself away?\""},
+    {"id": "s0", "kind": "choice", "original": "オープニングを見る", "translated": "Watch the opening"}
   ]
 }
 ```
 
-### 3. Translate
+`m…` are messages from the script's message table, and `s…` are choices from the string table. File names, labels and other non-text strings in that table are skipped.
 
-You can translate manually or use the built-in LLM translation:
+> **Upgrading from an older VNTools:** SPT extraction used to scan for text heuristically. It missed choices and sometimes kept junk characters, and its rebuild did not update the string tables, so any length change corrupted the script. Re-extract, then carry your work over with `migrate-json old.json new.json -o merged.json`.
 
-```bash
-# Translate with OpenAI GPT-4
-python3 systemnnn_tools.py translate translations/ -o translated/ --api openai
-
-# Translate with Anthropic Claude
-python3 systemnnn_tools.py translate translations/ -o translated/ --api anthropic
-
-# Translate with DeepL
-python3 systemnnn_tools.py translate translations/ -o translated/ --api deepl --lang Portuguese
-
-# Translate with local LLM (Ollama, LM Studio, etc.)
-python3 systemnnn_tools.py translate translations/ -o translated/ --api openai-compatible --base-url http://localhost:11434/v1
-
-# Translate a single file
-python3 systemnnn_tools.py translate main05.json -o main05_translated.json --api openai
-```
-
-**API Keys**: Set via environment variables or `--api-key`:
-- `OPENAI_API_KEY` - OpenAI
-- `ANTHROPIC_API_KEY` - Anthropic
-- `DEEPL_API_KEY` - DeepL
-
-Or translate manually by filling in the `"translated"` field for each string in the JSON files.
-
-### 4. Insert Translations
+## Web GUI
 
 ```bash
-# Insert translated text back into HXB script
-python3 systemnnn_tools.py insert-text extracted/main05.hxb translations/main05.json -o patched/main05.hxb
+pip install -r requirements.txt
+python3 app.py            # http://127.0.0.1:5000
 ```
 
-### 5. Repack Archive
+It has tabs for archives, script decrypt/encrypt, text extraction and insertion, AI translation, SJIS tunneling, word wrap and format conversion. The server listens on localhost only. Set `VNTOOLS_HOST=0.0.0.0` to expose it, and `VNTOOLS_DEBUG=1` only on a trusted machine.
 
-```bash
-# Create new archive with patched files
-python3 systemnnn_tools.py repack patched/ -o sin_text_patched.dat
+## Technical details
 
-# With compression (may increase load time)
-python3 systemnnn_tools.py repack patched/ -o sin_text_patched.dat --compress
-```
+### SPT script format
 
-### Analyze Archive
+Everything here comes from `nnnLib/execscript.cpp` in the engine source.
 
-```bash
-# View archive structure without extracting
-python3 systemnnn_tools.py analyze sin_text.dat
-```
+- The file is read as 32-bit words and decrypted with `w = (w ^ key) + inc; key += addXor; inc += addInc`. Shipped games use `key=0xFFFFFFFF, addXor=0, addInc=0`, which is the same as XOR-ing every byte with 0xFF. Other keys can be given with `--spt-key "xor,addXor,addInc"`.
+- Header words: `[4]` message count, `[5]` message table offset, `[6]` string count, `[7]` string table offset (offsets are in words). `SPTHEADER0` sits at byte 0x30.
+- Each table entry is the word offset of a NUL-terminated CP932 string. Bytecode refers to text only by table index, so `insert-text` writes a translation in place when it fits and otherwise appends it to the end of the file and repoints the table entry. The bytecode is never touched.
+- Messages are `name\r\nbody` (dialogue) or `body` (narration).
 
-## Translation Workflow
+### Engine settings (`init/*.xtx`, `init2/*.fxf`)
 
-1. **Backup original files**
-2. **Extract**: `python3 systemnnn_tools.py extract archive.dat -o extracted/`
-3. **Extract text**: `python3 systemnnn_tools.py extract-text extracted/ -o translations/`
-4. **Translate** JSON files (fill `"translated"` fields)
-5. **Insert**: For each script file, run `insert-text`
-6. **Repack**: `python3 systemnnn_tools.py repack patched/ -o archive_patched.dat`
-7. **Replace** original archive with patched version
+The files contain whitespace-separated `key value` pairs, and spaces inside a value are written as `?`. `.fxf` files are XOR 0xFF and take priority when an `init2/` folder exists. The keys that matter for patches:
 
-## Advanced Features Usage
+| File | Key | Meaning |
+|------|-----|---------|
+| game | `codeByte` | `1` = single-byte text (ANSI font, half-width cells); default `2` |
+| game | `defaultFont`, `gothicFontName`, `minchoFontName` | Font faces (`Segoe?UI`) |
+| game | `rightShift1Byte`, `fontWeight`, `useDirect2D` | Single-byte x offset, weight, Direct2D renderer |
+| printmessage | `fontSize`, `nextX`, `nextY`, `space`, `printX`, `printY` | Message layout |
+| printmessage | `windowMessageNumber`, `nameX`, `nameLengthMax` | Line capacity and name plate |
 
-### SJIS Tunneling (Fixing Punctuation Display Issues)
+### HXB script format
 
-The SJIS tunneling system solves the punctuation display problems reported in System-NNN games like Mugen Kairou 2. It maps unsupported characters (Western punctuation, accents) to unused Shift-JIS code points.
+- Signature: `DDSxHXB` (stored as `DDWuHXB` in archives, encrypted)
+- Text encoding: UTF-16LE
+- Encryption: XOR with key derived from file length
 
-**Python API Usage:**
-```python
-from systemnnn_tools import SJISTunnelEncoder
-
-# Create encoder
-encoder = SJISTunnelEncoder()
-
-# Encode text with tunneling
-japanese_text = "こんにちは"
-english_text = "Hello! How's it going?"
-
-# English punctuation will be tunneled
-encoded = encoder.encode(english_text)
-
-# Save mapping for game runtime (use with VNTextProxy or similar)
-encoder.save_mapping("sjis_ext.bin")
-
-# Decode back
-decoded = encoder.decode(encoded)
-
-# Get statistics
-stats = encoder.get_stats()
-print(f"Mapped {stats['mapped_chars']} characters")
-print(f"{stats['available_slots']} slots remaining")
-```
-
-**What it does:**
-- Maps unsupported characters to unused SJIS byte ranges (0x81-0x9F, 0xE0-0xEC)
-- Generates `sjis_ext.bin` mapping file (compatible with VNTextProxy)
-- Supports ~4000+ character mappings
-- Preserves standard SJIS characters unchanged
-
-### GPT Dictionary System
-
-Maintain consistent translations of character names, terminology, and context-specific phrases.
-
-**Setup (`gpt_dictionary.json`):**
-```json
-{
-  "pre_translation": {
-    "神学校": "Theological school/seminary (important location)",
-    "エルバート": "Elbert (male protagonist, cynical personality)"
-  },
-  "post_translation": {
-    "エルバート": "Elbert",
-    "レオニード": "Leonid",
-    "神学校": "Seminary"
-  },
-  "conditional": {
-    "chapter1": {
-      "教室": "classroom"
-    },
-    "chapter5": {
-      "教室": "lecture hall"
-    }
-  },
-  "character_contexts": {
-    "Elbert": "Male protagonist, cynical theology student, has a dark past",
-    "Leonid": "Elbert's mentor, strict but caring priest"
-  }
-}
-```
-
-**Python API Usage:**
-```python
-from systemnnn_tools import GPTDictionary
-
-# Load dictionary
-dictionary = GPTDictionary('gpt_dictionary.json')
-
-# Add entries programmatically
-dictionary.add_character_context("Elbert", "Male protagonist, theology student")
-dictionary.add_post_translation("エルバート", "Elbert")
-dictionary.add_conditional("chapter1", "教室", "classroom")
-
-# Get prompt context for LLM
-context = dictionary.get_context_prompt(context="chapter1")
-print(context)
-# Output includes character backgrounds and required translations
-
-# Apply post-processing (enforce dictionary terms)
-translated = "エルバート went to the seminary"
-fixed = dictionary.apply_post_processing(translated)
-# Result: "Elbert went to the seminary"
-
-dictionary.save()
-```
-
-### Translation QA (Quality Assurance)
-
-Automatically detect common translation errors.
-
-**Python API Usage:**
-```python
-from systemnnn_tools import TranslationQA, GPTDictionary
-
-# Create QA validator
-dictionary = GPTDictionary('gpt_dictionary.json')
-qa = TranslationQA(dictionary=dictionary)
-
-# Validate translations
-original = "エルバートは神学校に行った。"
-translated = "Elbert Elbert Elbert went to school."
-
-issues = qa.validate(original, translated, index=0)
-for issue in issues:
-    print(f"⚠ {issue}")
-# Output:
-# ⚠ Repeated word: 'Elbert'
-# ⚠ Missing required translation: 神学校 → Seminary
-
-# Generate full report
-qa.validate(original, translated, index=0)
-qa.validate(original2, translated2, index=1)
-# ... validate more strings ...
-
-print(qa.generate_report())
-# Outputs formatted report with all issues
-
-qa.clear()  # Clear for next batch
-```
-
-**Checks performed:**
-- Repeated words (3+ consecutive)
-- Untranslated Japanese characters
-- Unbalanced punctuation: `() [] {} 「」 『』`
-- Line break count mismatches
-- Translation length (too long/short)
-- Empty translations
-- Dictionary compliance
-
-### Character Name Management
-
-Maintain a reusable database of character name translations.
-
-**Setup (`names.json`):**
-```json
-{
-  "エルバート": "Elbert",
-  "レオニード": "Leonid",
-  "マリア": "Maria",
-  "セシル": "Cecil"
-}
-```
-
-**Python API Usage:**
-```python
-from systemnnn_tools import CharacterNameManager
-
-# Load name database
-names = CharacterNameManager('names.json')
-
-# Add names
-names.add_name("エルバート", "Elbert")
-names.add_name("レオニード", "Leonid")
-
-# Get translation
-translated_name = names.get_translation("エルバート")
-# Returns: "Elbert"
-
-# Extract names from VNT-format JSON
-with open('translations.json') as f:
-    data = json.load(f)
-names.extract_names_from_json(data)  # Extracts all "name" fields
-
-# Auto-fill translations in JSON data
-data = names.auto_translate_names(data)
-
-names.save()
-```
-
-### Word Wrapping
-
-Prevent text overflow in VN text boxes.
-
-**Python API Usage:**
-```python
-from systemnnn_tools import WordWrapper
-
-# Monospace font (typical for Japanese VNs)
-wrapper = WordWrapper(chars_per_line=40, mode='monospace')
-
-long_text = "This is a very long line of text that needs to be wrapped to fit within the game's text box constraints."
-wrapped = wrapper.wrap(long_text)
-print(wrapped)
-# Output:
-# This is a very long line of text
-# that needs to be wrapped to fit within
-# the game's text box constraints.
-
-line_count = wrapper.calculate_line_count(wrapped)
-print(f"Text occupies {line_count} lines")
-
-# Proportional font (for English translations)
-wrapper_prop = WordWrapper(chars_per_line=50, mode='proportional')
-wrapped_prop = wrapper_prop.wrap(long_text)
-# Uses character width estimates for better wrapping
-```
-
-### Checkpoint System
-
-Save and resume translation progress.
-
-**Python API Usage:**
-```python
-from systemnnn_tools import CheckpointManager
-
-checkpoint_mgr = CheckpointManager('.checkpoints')
-
-# Save checkpoint during translation
-project_data = {
-    'completed_files': ['main01.json', 'main02.json'],
-    'current_file': 'main03.json',
-    'current_index': 150,
-    'translation_cache': { ... }
-}
-checkpoint_mgr.save_checkpoint('shingakkou_translation', project_data)
-
-# Resume from checkpoint
-data = checkpoint_mgr.load_checkpoint('shingakkou_translation')
-if data:
-    print(f"Resuming from file: {data['current_file']}")
-    # Continue translation...
-
-# List all checkpoints
-checkpoints = checkpoint_mgr.list_checkpoints()
-for cp in checkpoints:
-    print(f"{cp['project']}: {cp['timestamp']}")
-
-# Delete after completion
-checkpoint_mgr.delete_checkpoint('shingakkou_translation')
-```
-
-## Technical Details
-
-### Game Directory Structure
-
-System-NNN games typically organize assets in these directories:
-
-```
-game/
-├── ev/          # Event CGs (DWQ format)
-├── bg/          # Background images (DWQ format)
-├── ta/          # Character sprites/textures (DWQ format)
-├── sys/         # System graphics (DWQ format)
-│   ├── sm/      # Small system images
-│   └── sc/      # Screen images
-├── se/          # Sound effects (VAW format)
-├── bgm/         # Background music (WGQ/OGG format)
-├── cdwave/      # Voice files (VAW format)
-├── *.dat        # DDP archives containing scripts and resources
-└── *.mft        # Font files
-```
-
-### DDP3 Archive Format
+### DDP3 archive format
 
 ```
 Offset  Size  Description
@@ -539,111 +216,41 @@ Offset  Size  Description
 0x08    4     Data section offset
 0x0C    20    Reserved
 0x20    256   Index section
-0x120+  var   File entries (variable length)
-        var   File data (compressed)
+0x120+  var   File entries (UTF-16LE names, variable length)
+        var   File data (SHS/LZSS compressed)
 ```
 
-File entries contain UTF-16LE encoded filenames with variable-length headers.
+### Other System-NNN formats (reference, not implemented)
 
-### HXB Script Format
+| Format | Files | Notes |
+|--------|-------|-------|
+| DWQ | `.gtb` + `.gpk` | Images: 64-byte ASCII header; BMP/JPEG/PNG, optional alpha mask |
+| VAW | `.vtb` + `.vpk` | Voice/SE: 12-byte index entries; WAV/OGG data |
+| WGQ | `.wgq` | BGM: 64-byte header + OGG |
+| MFT | `.mft` | Bitmap fonts (2/4/8-bit, SJIS order) |
 
-- Signature: `DDSxHXB` (stored as `DDWuHXB` in archives, encrypted)
-- Text encoding: UTF-16LE
-- Encryption: XOR with key derived from file length
-- Contains dialogue, choices, and game logic
+[GARbro](https://github.com/morkt/GARbro) opens DWQ/VAW for image and voice work.
 
-### SPT Script Format
-
-- Signature: `SPTHEADER0` at offset 0x30 (after XOR decryption)
-- Text encoding: Shift-JIS
-- Encryption: XOR 0xFF (simple byte-wise XOR)
-- Same encryption as XTX/FXF format
-- Used by: Mugen Kairou 2 and similar BlackCyc games
-
-### DWQ Image Format
-
-Image archives consist of paired files:
-- `.gtb` - Table file containing file index and metadata
-- `.gpk` - Pack file containing compressed image data
-
-Each image entry has a 64-byte ASCII header specifying the pack type (compression method).
-
-### VAW Audio Format
-
-Voice/sound archives consist of paired files:
-- `.vtb` - Table file with 12-byte entries (8-byte filename + 4-byte offset)
-- `.vpk` - Pack file containing audio data (WAV or OGG)
-
-### MFT Font Format
-
-```
-Offset  Size  Description
-0x00    3     Signature "MFT"
-0x20    3     Font size (ASCII digits)
-0x30    1     Bit depth (2, 4, or 8-bit per pixel)
-0x40+   var   Character bitmap data (Shift-JIS order)
-```
-
-Characters are rendered as anti-aliased grayscale bitmaps covering the Shift-JIS character set (approximately 9,024 characters).
-
-### Compression
-
-Uses SHS Compression (LZSS variant) - same as GARbro implementation. Features:
-- Sliding window up to 8191 bytes
-- Extended literal count encodings
-- Back-reference with overlap support
-
-### VNTranslationTools Compatibility
-
-Export to VNTranslationTools format for use with py3TranslateLLM:
-
-```bash
-# Extract in VNT format
-python3 systemnnn_tools.py extract-text scripts/ -o translations/ --format vnt
-
-# Convert existing JSON to VNT format
-python3 systemnnn_tools.py convert-format input.json -o output.json --format vnt
-```
-
-VNT format structure:
-```json
-[
-  {"name": "Character", "message": "Dialogue text"},
-  {"message": "Narration without speaker"}
-]
-```
-
-## Related Tools
+## Related tools
 
 | Tool | Purpose |
 |------|---------|
-| [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) | Alternative script extractor/patcher with Excel workflow |
-| [VNTextPatch](https://github.com/rafael-vasconcellos/VNTextPatch-net8) | .NET 8 multi-engine tool (24+ engines, SJIS tunneling) |
-| [vnilla](https://github.com/erengy/vnilla) | Minimal markup language for VN translation projects |
-| [GalTransl](https://github.com/GalTransl/GalTransl) | Advanced LLM translation with GPT dictionary & QA system |
-| [SoraTranslator](https://github.com/Immortalyzy/SoraTranslator) | VN translation with spreadsheet UI and token optimization |
-| [py3TranslateLLM](https://github.com/gdiaz384/py3TranslateLLM) | LLM translation for spreadsheets |
-| [LunaTranslator](https://github.com/HIllya51/LunaTranslator) | Real-time translation while playing |
+| [tinyan/SystemNNN](https://github.com/tinyan/SystemNNN) | Official System-NNN engine source (and [systemNNN_support](https://github.com/tinyan/systemNNN_support) tools) |
+| [GalTransl](https://github.com/GalTransl/GalTransl) | Agent-driven LLM translation with GenDic glossary and review passes |
+| [LinguaGacha](https://github.com/neavo/LinguaGacha) | LLM translator for games and novels |
+| [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) | VNTextPatch / VNTextProxy (SJIS tunneling, font proxy); archived 2023 |
+| [font_prop](https://github.com/louisbui63/font_prop) | Font proportionalizer for System-NNN (Direct2D builds) |
+| [system-nnn-translator](https://github.com/PicosonSoft/system-nnn-translator) | C++ SPT tools (Yami no Koe Zero) |
 | [GARbro](https://github.com/morkt/GARbro) | Universal VN resource browser |
+| [LunaTranslator](https://github.com/HIllya51/LunaTranslator) | Real-time translation while playing |
 
 ## Thanks
 
-### Core References
-- [GARbro](https://github.com/morkt/GARbro) by morkt - Format specifications and compression algorithms
-- [systemNNN_support](https://github.com/tinyan/systemNNN_support) by tinyan - Engine tools and format documentation (DWQ, VAW, MFT formats)
-- [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) by arcusmaximus - NNN/SPT format reference
-- [py3TranslateLLM](https://github.com/gdiaz384/py3TranslateLLM) by gdiaz384 - Translation workflow inspiration
-
-### Advanced Features Inspiration
-- [VNTextPatch](https://github.com/rafael-vasconcellos/VNTextPatch-net8) by rafael-vasconcellos - SJIS tunneling technique, word wrapping, character name management
-- [GalTransl](https://github.com/GalTransl/GalTransl) by GalTransl team - GPT dictionary system, translation QA, checkpoint system
-- [SoraTranslator](https://github.com/Immortalyzy/SoraTranslator) by Immortalyzy - Token optimization, integration patterns
-- [vnilla](https://github.com/erengy/vnilla) by erengy - Minimal markup format concepts
-
-### Community & Research
-- [Fuwanovel Forums](https://forums.fuwanovel.moe/) - System-NNN/DDSystem research and discussions
-- [Kungal Galgame Community](https://www.kungal.com/) - Chinese VN translation community insights
-- PIL/SLASH/BlackCyc/CYCLET - For creating amazing visual novels
+- [tinyan](https://github.com/tinyan) for publishing the System-NNN source
+- [GARbro](https://github.com/morkt/GARbro) by morkt for format specifications and compression
+- [VNTranslationTools](https://github.com/arcusmaximus/VNTranslationTools) by arcusmaximus for the SJIS tunneling scheme
+- [GalTransl](https://github.com/GalTransl/GalTransl) for the GPT dictionary and QA ideas
+- The [Fuwanovel](https://forums.fuwanovel.moe/) and Chinese galgame translation communities for System-NNN research
 
 ## License
 

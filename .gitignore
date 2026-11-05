@@ -29,3 +29,10 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+
+# Translation workspaces
+jp/
+en/
+patch/
+*.tmp
+sjis_ext.bin
