@@ -5,14 +5,13 @@ Provides REST API endpoints for all VNTools functionality
 """
 
 import os
-import sys
 import json
 import tempfile
-import shutil
-from pathlib import Path
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import NotFound
 import systemnnn_tools as vn
+import nnn_engine as nne
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
@@ -48,6 +47,8 @@ def extract_archive():
 
         # Extract archive
         archive = vn.DDPArchive(filepath)
+        if not archive.open():
+            return jsonify({'error': 'Not a DDP2/DDP3 archive'}), 400
         archive.extract_all(output_dir)
 
         # Get list of extracted files
@@ -81,7 +82,7 @@ def repack_archive():
         output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_name)
 
         # Create archive
-        writer = vn.DDPWriter(output_path)
+        writer = vn.DDPWriter(3)
 
         # Add all files from directory
         for root, dirs, files in os.walk(input_dir):
@@ -91,7 +92,7 @@ def repack_archive():
                 with open(file_path, 'rb') as fp:
                     writer.add_file(archive_path, fp.read())
 
-        writer.write()
+        writer.write(output_path)
 
         return jsonify({
             'success': True,
@@ -116,32 +117,32 @@ def decrypt_script():
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
 
-        # Determine script type and decrypt
+        with open(filepath, 'rb') as f:
+            data = f.read()
         if script_type == 'hxb':
-            script = vn.HXBScript.from_file(filepath)
-            output_ext = '.txt'
+            if data[:4] == b'DDWu':
+                content = vn.decrypt_hxb(vn.fix_hxb_signature(data))
+            else:
+                content = data  # DDSx files are stored unencrypted
+            preview = content.decode('utf-16-le', errors='replace')[:1000]
         elif script_type == 'spt':
-            script = vn.SPTScript.from_file(filepath)
-            output_ext = '.txt'
+            content = nne.nnn_decrypt(data)
+            preview = content.decode('cp932', errors='replace')[:1000]
         elif script_type == 'nnn':
-            script = vn.NNNScript.from_file(filepath)
-            output_ext = '.txt'
+            content = data
+            preview = content.decode('cp932', errors='replace')[:1000]
         else:
             return jsonify({'error': 'Invalid script type'}), 400
 
-        # Save decrypted content
-        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{filename}{output_ext}")
-        with open(output_path, 'wb') as f:
-            f.write(script.content)
-
-        # Read content for preview
-        preview = script.content.decode('utf-16-le' if script_type == 'hxb' else 'shift-jis', errors='replace')[:1000]
+        output_name = f"{filename}.dec"
+        with open(os.path.join(app.config['UPLOAD_FOLDER'], output_name), 'wb') as f:
+            f.write(content)
 
         return jsonify({
             'success': True,
             'message': 'Script decrypted successfully',
             'preview': preview,
-            'output_path': output_path
+            'output_path': output_name
         })
 
     except Exception as e:
@@ -165,24 +166,23 @@ def encrypt_script():
         with open(filepath, 'rb') as f:
             content = f.read()
 
-        # Encrypt based on type
         if script_type == 'hxb':
-            script = vn.HXBScript(content)
+            out = vn.encrypt_hxb(content)
             output_ext = '.hxb'
         elif script_type == 'spt':
-            script = vn.SPTScript(content)
+            out = nne.nnn_encrypt(content)
             output_ext = '.spt'
         else:
             return jsonify({'error': 'Invalid script type'}), 400
 
-        # Save encrypted file
-        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{filename}{output_ext}")
-        script.to_file(output_path)
+        output_name = f"{os.path.splitext(filename)[0]}{output_ext}"
+        with open(os.path.join(app.config['UPLOAD_FOLDER'], output_name), 'wb') as f:
+            f.write(out)
 
         return jsonify({
             'success': True,
             'message': 'Script encrypted successfully',
-            'output_path': output_path
+            'output_path': output_name
         })
 
     except Exception as e:
@@ -202,18 +202,18 @@ def extract_text():
 
         output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{filename}.json")
 
-        # Extract text
-        vn.extract_text(filepath, output_path)
+        if not vn.extract_text_with_format(filepath, output_path):
+            return jsonify({'error': 'Unknown or unparseable script'}), 400
 
-        # Read extracted text for preview
         with open(output_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        strings = data.get('strings', []) if isinstance(data, dict) else data
 
         return jsonify({
             'success': True,
-            'message': f'Extracted {len(data)} text strings',
-            'count': len(data),
-            'preview': data[:10] if len(data) > 10 else data,
+            'message': f'Extracted {len(strings)} text strings',
+            'count': len(strings),
+            'preview': strings[:10],
             'output_path': output_path
         })
 
@@ -226,65 +226,43 @@ def translate():
     try:
         data = request.get_json()
 
-        # Get parameters
         input_file = data.get('input_file')
-        provider = data.get('provider', 'openai')
-        api_key = data.get('api_key')
-        model = data.get('model', 'gpt-4')
-        source_lang = data.get('source_lang', 'Japanese')
+        provider = data.get('provider', 'anthropic')
+        api_key = data.get('api_key') or os.environ.get(vn.llm.API_KEY_ENV.get(provider, ''), '')
+        model = data.get('model', '')
         target_lang = data.get('target_lang', 'English')
-
-        # Translation settings
-        use_sjis_tunnel = data.get('use_sjis_tunnel', False)
         use_dictionary = data.get('use_dictionary', False)
         dictionary_file = data.get('dictionary_file')
         use_qa = data.get('use_qa', True)
 
         if not input_file or not os.path.exists(input_file):
             return jsonify({'error': 'Invalid input file'}), 400
-
-        if not api_key:
+        if not api_key and provider != 'openai-compatible':
             return jsonify({'error': 'API key required'}), 400
-
-        # Create translator
-        if provider == 'openai':
-            translator = vn.OpenAITranslator(api_key, model)
-        elif provider == 'anthropic':
-            translator = vn.AnthropicTranslator(api_key, model)
-        elif provider == 'deepl':
-            translator = vn.DeepLTranslator(api_key)
-        else:
+        if provider not in ('anthropic', 'openai', 'openai-compatible', 'deepl'):
             return jsonify({'error': 'Invalid provider'}), 400
 
-        # Set up SJIS tunnel if enabled
-        sjis_tunnel = vn.SJISTunnelEncoder() if use_sjis_tunnel else None
-
-        # Load dictionary if enabled
-        gpt_dict = None
+        dictionary = None
         if use_dictionary and dictionary_file and os.path.exists(dictionary_file):
-            gpt_dict = vn.GPTDictionary.from_file(dictionary_file)
+            dictionary = vn.GPTDictionary(dictionary_file)
 
-        # Set up QA
-        qa = vn.TranslationQA() if use_qa else None
+        translator = vn.make_chunk_translator(
+            provider, api_key=api_key, model=model, base_url=data.get('base_url', ''),
+            target_lang=target_lang, dictionary=dictionary,
+            dict_context=os.path.splitext(os.path.basename(input_file))[0])
 
         output_file = input_file.replace('.json', '_translated.json')
+        vn.translate_json_file(input_file, output_file, translator, dictionary)
 
-        # Translate (this is a simplified version - full implementation would need async handling)
-        vn.translate_json_file(
-            input_file,
-            output_file,
-            translator,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            gpt_dict=gpt_dict,
-            sjis_tunnel=sjis_tunnel,
-            qa=qa
-        )
+        qa_issues = None
+        if use_qa:
+            qa_issues = vn.qa_cli(output_file, dictionary=dictionary)
 
         return jsonify({
             'success': True,
             'message': 'Translation completed',
-            'output_path': output_file
+            'output_path': output_file,
+            'qa_issues': qa_issues
         })
 
     except Exception as e:
@@ -305,10 +283,12 @@ def insert_text():
         if not json_file or not os.path.exists(json_file):
             return jsonify({'error': 'Invalid JSON file'}), 400
 
-        output_path = script_file.replace('.', '_translated.')
+        root, ext = os.path.splitext(script_file)
+        output_path = root + '_translated' + ext
 
-        # Insert text
-        vn.insert_text(script_file, json_file, output_path)
+        vn.insert_text_cli(script_file, json_file, output_path,
+                           wrap=str(data.get('wrap', 'auto')),
+                           code_byte=int(data.get('code_byte', 2)))
 
         return jsonify({
             'success': True,
@@ -338,14 +318,18 @@ def analyze_archive():
         files_info = []
         total_size = 0
 
+        if not archive.open():
+            return jsonify({'error': 'Not a DDP2/DDP3 archive'}), 400
+
         for entry in archive.entries:
+            packed = entry.packed_size if entry.is_packed else entry.unpacked_size
             files_info.append({
-                'path': entry.path,
-                'size': entry.size,
-                'compressed_size': entry.compressed_size,
-                'compression_ratio': f"{(1 - entry.compressed_size / entry.size) * 100:.1f}%" if entry.size > 0 else "0%"
+                'path': entry.name,
+                'size': entry.unpacked_size,
+                'compressed_size': packed,
+                'compression_ratio': f"{(1 - packed / entry.unpacked_size) * 100:.1f}%" if entry.unpacked_size > 0 else "0%"
             })
-            total_size += entry.size
+            total_size += entry.unpacked_size
 
         return jsonify({
             'success': True,
@@ -361,11 +345,10 @@ def analyze_archive():
 def download_file(filename):
     """Download a processed file"""
     try:
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        if os.path.exists(filepath):
-            return send_file(filepath, as_attachment=True)
-        else:
-            return jsonify({'error': 'File not found'}), 404
+        # send_from_directory refuses paths that escape the upload folder
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=True)
+    except NotFound:
+        return jsonify({'error': 'File not found'}), 404
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -382,7 +365,7 @@ def sjis_tunnel_encode():
 
         return jsonify({
             'success': True,
-            'encoded': encoded,
+            'encoded': encoded.hex(' '),
             'mapping': mapping
         })
 
@@ -398,10 +381,11 @@ def sjis_tunnel_decode():
         mapping = data.get('mapping', {})
 
         encoder = vn.SJISTunnelEncoder()
-        if mapping:
-            encoder.mapping = {int(k): v for k, v in mapping.items()}
+        # mapping is {"hex tunnel code": char} as returned by /encode, in order
+        for _code, ch in mapping.items():
+            encoder.tunnel_bytes(ch)
 
-        decoded = encoder.decode(text)
+        decoded = encoder.decode(bytes.fromhex(text.replace(' ', '')))
 
         return jsonify({
             'success': True,
@@ -420,7 +404,7 @@ def word_wrap():
         max_width = int(data.get('max_width', 40))
         font_type = data.get('font_type', 'monospace')
 
-        wrapper = vn.WordWrapper(max_width=max_width, font_type=font_type)
+        wrapper = vn.WordWrapper(chars_per_line=max_width, mode=font_type)
         wrapped = wrapper.wrap(text)
 
         return jsonify({
@@ -466,7 +450,10 @@ if __name__ == '__main__':
     print("=" * 60)
     print("VNTools Web GUI")
     print("=" * 60)
-    print("Starting server on http://localhost:5000")
+    host = os.environ.get('VNTOOLS_HOST', '127.0.0.1')
+    print(f"Starting server on http://{host}:5000")
     print("Press Ctrl+C to stop")
     print("=" * 60)
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Debug mode exposes the Werkzeug debugger (remote code execution), so it is
+    # opt-in, and the server only listens on localhost unless VNTOOLS_HOST is set.
+    app.run(debug=os.environ.get('VNTOOLS_DEBUG') == '1', host=host, port=5000)
